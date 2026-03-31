@@ -78,6 +78,269 @@ func makeBundleTape(id, route, method, url string) Tape {
 	}
 }
 
+func makeBundleTapeAt(id, route, method, url string, recordedAt time.Time) Tape {
+	t := makeBundleTape(id, route, method, url)
+	t.RecordedAt = recordedAt
+	return t
+}
+
+func TestExportBundle_WithRoutes_Single(t *testing.T) {
+	store := NewMemoryStore()
+	saveTestTapes(t, store,
+		makeBundleTape("t1", "stripe", "GET", "http://stripe.test/1"),
+		makeBundleTape("t2", "s3", "GET", "http://s3.test/1"),
+		makeBundleTape("t3", "auth", "POST", "http://auth.test/1"),
+	)
+
+	r, err := ExportBundle(context.Background(), store, WithRoutes("stripe"))
+	if err != nil {
+		t.Fatalf("ExportBundle() error: %v", err)
+	}
+
+	entries := readBundle(t, r)
+
+	var manifest Manifest
+	if err := json.Unmarshal(entries["manifest.json"], &manifest); err != nil {
+		t.Fatalf("failed to unmarshal manifest: %v", err)
+	}
+
+	if manifest.FixtureCount != 1 {
+		t.Errorf("manifest.FixtureCount = %d, want 1", manifest.FixtureCount)
+	}
+	wantRoutes := []string{"stripe"}
+	if len(manifest.Routes) != 1 || manifest.Routes[0] != "stripe" {
+		t.Errorf("manifest.Routes = %v, want %v", manifest.Routes, wantRoutes)
+	}
+
+	if _, ok := entries["fixtures/t1.json"]; !ok {
+		t.Error("expected fixtures/t1.json in bundle")
+	}
+	if _, ok := entries["fixtures/t2.json"]; ok {
+		t.Error("unexpected fixtures/t2.json in bundle")
+	}
+	if _, ok := entries["fixtures/t3.json"]; ok {
+		t.Error("unexpected fixtures/t3.json in bundle")
+	}
+}
+
+func TestExportBundle_WithRoutes_Multiple(t *testing.T) {
+	store := NewMemoryStore()
+	saveTestTapes(t, store,
+		makeBundleTape("t1", "stripe", "GET", "http://stripe.test/1"),
+		makeBundleTape("t2", "s3", "GET", "http://s3.test/1"),
+		makeBundleTape("t3", "auth", "POST", "http://auth.test/1"),
+	)
+
+	r, err := ExportBundle(context.Background(), store, WithRoutes("stripe", "s3"))
+	if err != nil {
+		t.Fatalf("ExportBundle() error: %v", err)
+	}
+
+	entries := readBundle(t, r)
+
+	var manifest Manifest
+	if err := json.Unmarshal(entries["manifest.json"], &manifest); err != nil {
+		t.Fatalf("failed to unmarshal manifest: %v", err)
+	}
+
+	if manifest.FixtureCount != 2 {
+		t.Errorf("manifest.FixtureCount = %d, want 2", manifest.FixtureCount)
+	}
+	wantRoutes := []string{"s3", "stripe"}
+	sort.Strings(manifest.Routes)
+	if len(manifest.Routes) != 2 {
+		t.Fatalf("manifest.Routes = %v, want %v", manifest.Routes, wantRoutes)
+	}
+	for i, r := range manifest.Routes {
+		if r != wantRoutes[i] {
+			t.Errorf("manifest.Routes[%d] = %q, want %q", i, r, wantRoutes[i])
+		}
+	}
+
+	if _, ok := entries["fixtures/t1.json"]; !ok {
+		t.Error("expected fixtures/t1.json in bundle")
+	}
+	if _, ok := entries["fixtures/t2.json"]; !ok {
+		t.Error("expected fixtures/t2.json in bundle")
+	}
+	if _, ok := entries["fixtures/t3.json"]; ok {
+		t.Error("unexpected fixtures/t3.json in bundle")
+	}
+}
+
+func TestExportBundle_WithMethods(t *testing.T) {
+	store := NewMemoryStore()
+	saveTestTapes(t, store,
+		makeBundleTape("t1", "api", "GET", "http://api.test/1"),
+		makeBundleTape("t2", "api", "POST", "http://api.test/2"),
+		makeBundleTape("t3", "api", "GET", "http://api.test/3"),
+	)
+
+	r, err := ExportBundle(context.Background(), store, WithMethods("GET"))
+	if err != nil {
+		t.Fatalf("ExportBundle() error: %v", err)
+	}
+
+	entries := readBundle(t, r)
+
+	var manifest Manifest
+	if err := json.Unmarshal(entries["manifest.json"], &manifest); err != nil {
+		t.Fatalf("failed to unmarshal manifest: %v", err)
+	}
+
+	if manifest.FixtureCount != 2 {
+		t.Errorf("manifest.FixtureCount = %d, want 2", manifest.FixtureCount)
+	}
+
+	if _, ok := entries["fixtures/t1.json"]; !ok {
+		t.Error("expected fixtures/t1.json in bundle")
+	}
+	if _, ok := entries["fixtures/t2.json"]; ok {
+		t.Error("unexpected fixtures/t2.json in bundle")
+	}
+	if _, ok := entries["fixtures/t3.json"]; !ok {
+		t.Error("expected fixtures/t3.json in bundle")
+	}
+}
+
+func TestExportBundle_WithSince(t *testing.T) {
+	cutoff := time.Date(2026, 3, 15, 12, 0, 0, 0, time.UTC)
+	before := cutoff.Add(-1 * time.Hour)
+	after := cutoff.Add(1 * time.Hour)
+
+	store := NewMemoryStore()
+	saveTestTapes(t, store,
+		makeBundleTapeAt("t-old", "api", "GET", "http://api.test/old", before),
+		makeBundleTapeAt("t-new", "api", "GET", "http://api.test/new", after),
+		makeBundleTapeAt("t-exact", "api", "POST", "http://api.test/exact", cutoff),
+	)
+
+	r, err := ExportBundle(context.Background(), store, WithSince(cutoff))
+	if err != nil {
+		t.Fatalf("ExportBundle() error: %v", err)
+	}
+
+	entries := readBundle(t, r)
+
+	var manifest Manifest
+	if err := json.Unmarshal(entries["manifest.json"], &manifest); err != nil {
+		t.Fatalf("failed to unmarshal manifest: %v", err)
+	}
+
+	// t-exact is at cutoff (not before), so it should be included
+	if manifest.FixtureCount != 2 {
+		t.Errorf("manifest.FixtureCount = %d, want 2", manifest.FixtureCount)
+	}
+
+	if _, ok := entries["fixtures/t-old.json"]; ok {
+		t.Error("unexpected fixtures/t-old.json in bundle (recorded before cutoff)")
+	}
+	if _, ok := entries["fixtures/t-new.json"]; !ok {
+		t.Error("expected fixtures/t-new.json in bundle")
+	}
+	if _, ok := entries["fixtures/t-exact.json"]; !ok {
+		t.Error("expected fixtures/t-exact.json in bundle (recorded at cutoff)")
+	}
+}
+
+func TestExportBundle_CombinedFilters(t *testing.T) {
+	store := NewMemoryStore()
+	saveTestTapes(t, store,
+		makeBundleTape("t1", "stripe", "POST", "http://stripe.test/charge"),
+		makeBundleTape("t2", "stripe", "GET", "http://stripe.test/balance"),
+		makeBundleTape("t3", "s3", "POST", "http://s3.test/upload"),
+		makeBundleTape("t4", "auth", "POST", "http://auth.test/token"),
+	)
+
+	r, err := ExportBundle(context.Background(), store, WithRoutes("stripe"), WithMethods("POST"))
+	if err != nil {
+		t.Fatalf("ExportBundle() error: %v", err)
+	}
+
+	entries := readBundle(t, r)
+
+	var manifest Manifest
+	if err := json.Unmarshal(entries["manifest.json"], &manifest); err != nil {
+		t.Fatalf("failed to unmarshal manifest: %v", err)
+	}
+
+	if manifest.FixtureCount != 1 {
+		t.Errorf("manifest.FixtureCount = %d, want 1", manifest.FixtureCount)
+	}
+
+	if _, ok := entries["fixtures/t1.json"]; !ok {
+		t.Error("expected fixtures/t1.json (stripe + POST)")
+	}
+	if _, ok := entries["fixtures/t2.json"]; ok {
+		t.Error("unexpected fixtures/t2.json (stripe + GET, method mismatch)")
+	}
+	if _, ok := entries["fixtures/t3.json"]; ok {
+		t.Error("unexpected fixtures/t3.json (s3 + POST, route mismatch)")
+	}
+}
+
+func TestExportBundle_FilterMatchesNothing(t *testing.T) {
+	store := NewMemoryStore()
+	saveTestTapes(t, store,
+		makeBundleTape("t1", "api", "GET", "http://api.test/1"),
+	)
+
+	r, err := ExportBundle(context.Background(), store, WithRoutes("nonexistent"))
+	if err != nil {
+		t.Fatalf("ExportBundle() error: %v", err)
+	}
+
+	entries := readBundle(t, r)
+
+	var manifest Manifest
+	if err := json.Unmarshal(entries["manifest.json"], &manifest); err != nil {
+		t.Fatalf("failed to unmarshal manifest: %v", err)
+	}
+
+	if manifest.FixtureCount != 0 {
+		t.Errorf("manifest.FixtureCount = %d, want 0", manifest.FixtureCount)
+	}
+	if len(manifest.Routes) != 0 {
+		t.Errorf("manifest.Routes = %v, want empty", manifest.Routes)
+	}
+
+	// Only manifest entry
+	if len(entries) != 1 {
+		t.Errorf("bundle has %d entries, want 1 (manifest only)", len(entries))
+	}
+}
+
+func TestExportBundle_WithMethodsCaseInsensitive(t *testing.T) {
+	store := NewMemoryStore()
+	saveTestTapes(t, store,
+		makeBundleTape("t1", "api", "GET", "http://api.test/1"),
+		makeBundleTape("t2", "api", "POST", "http://api.test/2"),
+	)
+
+	r, err := ExportBundle(context.Background(), store, WithMethods("get"))
+	if err != nil {
+		t.Fatalf("ExportBundle() error: %v", err)
+	}
+
+	entries := readBundle(t, r)
+
+	var manifest Manifest
+	if err := json.Unmarshal(entries["manifest.json"], &manifest); err != nil {
+		t.Fatalf("failed to unmarshal manifest: %v", err)
+	}
+
+	if manifest.FixtureCount != 1 {
+		t.Errorf("manifest.FixtureCount = %d, want 1", manifest.FixtureCount)
+	}
+
+	if _, ok := entries["fixtures/t1.json"]; !ok {
+		t.Error("expected fixtures/t1.json (GET tape should match lowercase 'get' filter)")
+	}
+	if _, ok := entries["fixtures/t2.json"]; ok {
+		t.Error("unexpected fixtures/t2.json (POST tape should not match 'get' filter)")
+	}
+}
+
 func TestExportBundle_WithFixtures(t *testing.T) {
 	store := NewMemoryStore()
 	tape1 := makeBundleTape("tape-001", "users-api", "GET", "https://api.example.com/users")
