@@ -924,6 +924,51 @@ func (r *failingReader) Read(p []byte) (int, error) {
 
 func (r *failingReader) Close() error { return nil }
 
+// --- RoundTrip after Close (closed guard) ---
+
+func TestRecorder_RoundTripAfterClose(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("still works"))
+	}))
+	defer srv.Close()
+
+	store := NewMemoryStore()
+	rec := NewRecorder(store,
+		WithTransport(srv.Client().Transport),
+		WithRoute("after-close"),
+		WithAsync(true),
+		WithBufferSize(16),
+	)
+
+	// Close the recorder first.
+	if err := rec.Close(); err != nil {
+		t.Fatalf("Close error: %v", err)
+	}
+
+	// RoundTrip after Close must not panic and must pass through to the transport.
+	req, _ := http.NewRequest("GET", srv.URL+"/after-close", nil)
+	resp, err := rec.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("RoundTrip after Close should succeed, got: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "still works" {
+		t.Errorf("response body = %q, want %q", body, "still works")
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	// No new tapes should have been recorded after Close.
+	tapes, _ := store.List(context.Background(), Filter{})
+	if len(tapes) != 0 {
+		t.Errorf("len(tapes) = %d, want 0 (no recording after Close)", len(tapes))
+	}
+}
+
 // --- http.RoundTripper interface compliance ---
 
 func TestRecorder_ImplementsRoundTripper(t *testing.T) {

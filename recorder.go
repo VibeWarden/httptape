@@ -8,6 +8,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"sync"
+	"sync/atomic"
 )
 
 // Sanitizer transforms a Tape before it is persisted, redacting or faking
@@ -38,6 +39,7 @@ type Recorder struct {
 	onError   func(error)       // callback for async write errors; defaults to no-op
 
 	// async internals
+	closed    atomic.Bool  // set to true when Close is called; guards against send-on-closed-channel
 	tapeCh    chan Tape     // buffered channel for async mode
 	done      chan struct{} // closed when background goroutine exits
 	closeOnce sync.Once    // ensures Close is idempotent
@@ -165,6 +167,12 @@ func NewRecorder(store Store, opts ...RecorderOption) *Recorder {
 // Sampling: if a random float is >= sampleRate, the request is passed through
 // without recording.
 func (r *Recorder) RoundTrip(req *http.Request) (*http.Response, error) {
+	// Closed guard: if the recorder has been closed, pass through without recording.
+	// This prevents sending on a closed channel in async mode.
+	if r.closed.Load() {
+		return r.transport.RoundTrip(req)
+	}
+
 	// Sampling check: skip recording if not sampled.
 	if r.sampleRate < 1.0 && r.randFloat() >= r.sampleRate {
 		return r.transport.RoundTrip(req)
@@ -258,6 +266,7 @@ func (r *Recorder) Close() error {
 		return nil
 	}
 	r.closeOnce.Do(func() {
+		r.closed.Store(true)
 		close(r.tapeCh)
 		<-r.done
 	})
