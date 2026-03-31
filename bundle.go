@@ -41,6 +41,9 @@ type ExportOption func(*exportConfig)
 // exportConfig holds resolved options for ExportBundle.
 type exportConfig struct {
 	sanitizerConfig string
+	routes          []string  // nil = no route filter
+	methods         []string  // nil = no method filter; stored uppercase
+	since           time.Time // zero = no time filter
 }
 
 // WithSanitizerConfig attaches a human-readable sanitizer configuration
@@ -48,6 +51,36 @@ type exportConfig struct {
 func WithSanitizerConfig(summary string) ExportOption {
 	return func(cfg *exportConfig) {
 		cfg.sanitizerConfig = summary
+	}
+}
+
+// WithRoutes filters the export to include only tapes whose Route field
+// matches one of the specified route names. If no routes are specified,
+// this option is a no-op. Route matching is exact (case-sensitive).
+func WithRoutes(routes ...string) ExportOption {
+	return func(cfg *exportConfig) {
+		cfg.routes = routes
+	}
+}
+
+// WithMethods filters the export to include only tapes whose HTTP method
+// matches one of the specified methods. Methods are compared case-insensitively
+// (normalized to uppercase). If no methods are specified, this option is a no-op.
+func WithMethods(methods ...string) ExportOption {
+	return func(cfg *exportConfig) {
+		normalized := make([]string, len(methods))
+		for i, m := range methods {
+			normalized[i] = strings.ToUpper(m)
+		}
+		cfg.methods = normalized
+	}
+}
+
+// WithSince filters the export to include only tapes recorded at or after
+// the given timestamp. The zero value of time.Time disables this filter.
+func WithSince(t time.Time) ExportOption {
+	return func(cfg *exportConfig) {
+		cfg.since = t
 	}
 }
 
@@ -73,6 +106,8 @@ func ExportBundle(ctx context.Context, s Store, opts ...ExportOption) (io.Reader
 	if err != nil {
 		return nil, fmt.Errorf("httptape: export: %w", err)
 	}
+
+	tapes = filterTapes(tapes, cfg)
 
 	pr, pw := io.Pipe()
 
@@ -258,6 +293,60 @@ func validateFixture(t Tape) error {
 		return fmt.Errorf("httptape: import: fixture %s has empty request URL", t.ID)
 	}
 	return nil
+}
+
+// filterTapes returns the subset of tapes matching the export filters.
+// All non-nil/non-zero filters are AND-ed: a tape must pass every active
+// filter to be included. If no filters are set, all tapes are returned.
+func filterTapes(tapes []Tape, cfg exportConfig) []Tape {
+	if len(cfg.routes) == 0 && len(cfg.methods) == 0 && cfg.since.IsZero() {
+		return tapes
+	}
+
+	result := make([]Tape, 0, len(tapes))
+	for _, t := range tapes {
+		if !matchesRouteFilter(t, cfg.routes) {
+			continue
+		}
+		if !matchesMethodFilter(t, cfg.methods) {
+			continue
+		}
+		if !cfg.since.IsZero() && t.RecordedAt.Before(cfg.since) {
+			continue
+		}
+		result = append(result, t)
+	}
+	return result
+}
+
+// matchesRouteFilter returns true if the tape's route matches any of the
+// specified routes, or if routes is empty (no filter).
+func matchesRouteFilter(t Tape, routes []string) bool {
+	if len(routes) == 0 {
+		return true
+	}
+	for _, r := range routes {
+		if t.Route == r {
+			return true
+		}
+	}
+	return false
+}
+
+// matchesMethodFilter returns true if the tape's HTTP method matches any of
+// the specified methods, or if methods is empty (no filter).
+// Methods in the slice are expected to already be uppercase.
+func matchesMethodFilter(t Tape, methods []string) bool {
+	if len(methods) == 0 {
+		return true
+	}
+	m := strings.ToUpper(t.Request.Method)
+	for _, allowed := range methods {
+		if m == allowed {
+			return true
+		}
+	}
+	return false
 }
 
 // buildManifest constructs a Manifest from the given tapes and export configuration.
