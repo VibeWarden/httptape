@@ -3,12 +3,17 @@ package httptape
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 )
+
+// ErrInvalidID is returned when a tape ID contains path separators or
+// directory traversal components that could escape the base directory.
+var ErrInvalidID = errors.New("httptape: invalid tape ID")
 
 // FileStore is a filesystem-backed Store implementation. Each tape is persisted
 // as a single JSON file. Safe for concurrent use within a single process.
@@ -50,11 +55,15 @@ func (fs *FileStore) Save(ctx context.Context, tape Tape) error {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("httptape: filestore save %s: %w", tape.ID, err)
 	}
+	if err := validateID(tape.ID); err != nil {
+		return fmt.Errorf("httptape: filestore save: %w", err)
+	}
 
 	data, err := json.MarshalIndent(tape, "", "  ")
 	if err != nil {
 		return fmt.Errorf("httptape: filestore save %s: %w", tape.ID, err)
 	}
+	data = append(data, '\n') // POSIX trailing newline
 
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
@@ -89,6 +98,9 @@ func (fs *FileStore) Save(ctx context.Context, tape Tape) error {
 func (fs *FileStore) Load(ctx context.Context, id string) (Tape, error) {
 	if err := ctx.Err(); err != nil {
 		return Tape{}, fmt.Errorf("httptape: filestore load %s: %w", id, err)
+	}
+	if err := validateID(id); err != nil {
+		return Tape{}, fmt.Errorf("httptape: filestore load: %w", err)
 	}
 
 	fs.mu.RLock()
@@ -161,6 +173,9 @@ func (fs *FileStore) Delete(ctx context.Context, id string) error {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("httptape: filestore delete %s: %w", id, err)
 	}
+	if err := validateID(id); err != nil {
+		return fmt.Errorf("httptape: filestore delete: %w", err)
+	}
 
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
@@ -175,6 +190,28 @@ func (fs *FileStore) Delete(ctx context.Context, id string) error {
 
 	if err := os.Remove(path); err != nil {
 		return fmt.Errorf("httptape: filestore delete %s: %w", id, err)
+	}
+	return nil
+}
+
+// validateID checks that id is safe to use as a filename component.
+// It rejects IDs containing path separators or ".." traversal components.
+func validateID(id string) error {
+	if id == "" {
+		return fmt.Errorf("%w: empty ID", ErrInvalidID)
+	}
+	if strings.ContainsAny(id, `/\`) {
+		return fmt.Errorf("%w: contains path separator", ErrInvalidID)
+	}
+	if id == ".." || strings.HasPrefix(id, ".."+string(filepath.Separator)) ||
+		strings.HasSuffix(id, string(filepath.Separator)+"..") ||
+		strings.Contains(id, string(filepath.Separator)+".."+string(filepath.Separator)) {
+		return fmt.Errorf("%w: contains path traversal", ErrInvalidID)
+	}
+	// Also reject the bare ".." even without separators (already handled above)
+	// and any cleaned path that would escape.
+	if id == "." {
+		return fmt.Errorf("%w: invalid ID", ErrInvalidID)
 	}
 	return nil
 }

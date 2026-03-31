@@ -494,6 +494,122 @@ func TestFileStore_List_SkipsNonJSON(t *testing.T) {
 	}
 }
 
+func TestFileStore_PathTraversal(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewFileStore(WithDirectory(t.TempDir()))
+	if err != nil {
+		t.Fatalf("NewFileStore() error = %v", err)
+	}
+
+	maliciousIDs := []struct {
+		name string
+		id   string
+	}{
+		{"dot-dot", ".."},
+		{"dot-dot-slash", "../../etc/passwd"},
+		{"slash-prefix", "/etc/passwd"},
+		{"backslash", `..\..\etc\passwd`},
+		{"embedded-slash", "foo/bar"},
+		{"embedded-backslash", `foo\bar`},
+		{"empty", ""},
+		{"dot", "."},
+	}
+
+	for _, tc := range maliciousIDs {
+		t.Run("Save_"+tc.name, func(t *testing.T) {
+			tape := makeTape("route", "GET", "http://example.com")
+			tape.ID = tc.id
+			err := store.Save(ctx, tape)
+			if err == nil {
+				t.Fatalf("Save(ID=%q) error = nil, want ErrInvalidID", tc.id)
+			}
+			if !errors.Is(err, ErrInvalidID) {
+				t.Errorf("Save(ID=%q) error = %v, want ErrInvalidID", tc.id, err)
+			}
+		})
+
+		t.Run("Load_"+tc.name, func(t *testing.T) {
+			_, err := store.Load(ctx, tc.id)
+			if err == nil {
+				t.Fatalf("Load(ID=%q) error = nil, want ErrInvalidID", tc.id)
+			}
+			if !errors.Is(err, ErrInvalidID) {
+				t.Errorf("Load(ID=%q) error = %v, want ErrInvalidID", tc.id, err)
+			}
+		})
+
+		t.Run("Delete_"+tc.name, func(t *testing.T) {
+			err := store.Delete(ctx, tc.id)
+			if err == nil {
+				t.Fatalf("Delete(ID=%q) error = nil, want ErrInvalidID", tc.id)
+			}
+			if !errors.Is(err, ErrInvalidID) {
+				t.Errorf("Delete(ID=%q) error = %v, want ErrInvalidID", tc.id, err)
+			}
+		})
+	}
+}
+
+func TestFileStore_ValidIDs(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewFileStore(WithDirectory(t.TempDir()))
+	if err != nil {
+		t.Fatalf("NewFileStore() error = %v", err)
+	}
+
+	validIDs := []string{
+		"simple",
+		"with-dashes",
+		"with_underscores",
+		"CamelCase",
+		"123-numeric",
+		"uuid-like-550e8400-e29b-41d4-a716-446655440000",
+	}
+
+	for _, id := range validIDs {
+		t.Run(id, func(t *testing.T) {
+			tape := makeTape("route", "GET", "http://example.com")
+			tape.ID = id
+			if err := store.Save(ctx, tape); err != nil {
+				t.Fatalf("Save(ID=%q) unexpected error = %v", id, err)
+			}
+			loaded, err := store.Load(ctx, id)
+			if err != nil {
+				t.Fatalf("Load(ID=%q) unexpected error = %v", id, err)
+			}
+			if loaded.ID != id {
+				t.Errorf("Load().ID = %q, want %q", loaded.ID, id)
+			}
+		})
+	}
+}
+
+func TestFileStore_TrailingNewline(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+	store, err := NewFileStore(WithDirectory(dir))
+	if err != nil {
+		t.Fatalf("NewFileStore() error = %v", err)
+	}
+
+	tape := makeTape("route", "GET", "http://example.com")
+	if err := store.Save(ctx, tape); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, tape.ID+".json"))
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+
+	if len(data) == 0 {
+		t.Fatal("file is empty")
+	}
+	if data[len(data)-1] != '\n' {
+		t.Error("JSON file does not end with trailing newline")
+	}
+}
+
 func TestFileStore_DefaultDirectory(t *testing.T) {
 	// Change to a temp dir to avoid polluting the working directory.
 	origDir, err := os.Getwd()
