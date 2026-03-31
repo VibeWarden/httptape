@@ -15,7 +15,9 @@ import (
 //   - A positive value means the candidate matches, with higher values
 //     indicating a stronger/more specific match.
 //
-// Implementations must not modify the request or the candidate tape.
+// Implementations must not modify the candidate tape. They may read and
+// restore the request body (as MatchBodyHash does) but must leave the
+// request otherwise unchanged.
 type MatchCriterion func(req *http.Request, candidate Tape) int
 
 // MatchMethod returns a MatchCriterion that requires the HTTP method to match.
