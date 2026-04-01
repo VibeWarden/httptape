@@ -4035,3 +4035,905 @@ established in ADR-4.
   wrapper could extract matches without changing `MatchPathRegex` itself.
 - **Import addition**: `matcher.go` will need `regexp` and `fmt` added to its
   import block. Both are stdlib (L-04 compliant).
+
+---
+
+### ADR-13: MatchHeaders — Header-based matching criterion
+
+**Date**: 2026-03-30
+**Issue**: #39
+**Status**: Accepted
+
+#### Context
+
+Some APIs differentiate request types using HTTP headers rather than URL paths.
+Common examples include API versioning via the `Accept` header
+(`application/vnd.api.v2+json`), content negotiation via `Content-Type`, and
+feature flags via custom headers (`X-Feature-Flag: new-checkout`). When the same
+URL path serves different responses based on headers, the existing matcher
+criteria (method, path, query params, body hash) cannot distinguish between them.
+
+Issue #39 requests a `MatchHeaders` criterion that lets users include specific
+header key-value pairs in matching criteria.
+
+The existing matcher infrastructure from ADR-4 supports this directly: add a new
+`MatchCriterion` function, assign it a score weight, and users compose it into a
+`CompositeMatcher`. No changes to the `Matcher` interface, `CompositeMatcher`, or
+existing criteria are needed.
+
+Key constraints:
+- Stdlib only (L-04). `net/http` provides `http.CanonicalHeaderKey` and
+  `http.Header` — both stdlib.
+- No panics (L-11). Header key and value are plain strings; no fallible parsing.
+- Progressive matching (L-09). Header matching is opt-in; `DefaultMatcher` is
+  unchanged.
+- HTTP spec compliance: header names are case-insensitive per RFC 7230 section
+  3.2. Header values are case-sensitive.
+
+#### Decision
+
+##### MatchHeaders constructor
+
+```go
+// MatchHeaders returns a MatchCriterion that requires the specified header to
+// be present in both the incoming request and the candidate tape's recorded
+// request, with an exact value match.
+//
+// The header name is canonicalized using http.CanonicalHeaderKey, making it
+// case-insensitive per HTTP specification (RFC 7230 section 3.2). The header
+// value comparison is exact and case-sensitive.
+//
+// If the header has multiple values in either the request or the tape, the
+// criterion checks whether the specified value appears among them (any-of
+// semantics). This handles the common case where a header may be set multiple
+// times (e.g., multiple Accept values).
+//
+// To require multiple headers, add multiple MatchHeaders criteria to the
+// CompositeMatcher. They are AND-ed together naturally: if any criterion
+// returns 0, the candidate is eliminated.
+//
+// Returns score 3 on match, 0 on mismatch.
+//
+// Example:
+//
+//	matcher := NewCompositeMatcher(
+//	    MatchMethod(),
+//	    MatchPath(),
+//	    MatchHeaders("Accept", "application/vnd.api.v2+json"),
+//	    MatchHeaders("X-Feature-Flag", "new-checkout"),
+//	)
+func MatchHeaders(key, value string) MatchCriterion
+```
+
+##### Why a single key-value pair per call (not a map)
+
+The alternative — `MatchHeaders(headers map[string]string)` accepting multiple
+key-value pairs at once — was considered. The single-pair design was chosen
+because:
+
+- It composes naturally with `CompositeMatcher`. Each criterion is independent
+  and scores independently. Users can mix header criteria with other criteria
+  freely.
+- It is consistent with the existing criterion constructor pattern: each
+  constructor returns one `MatchCriterion` for one dimension.
+- A map-based constructor would hide the AND semantics inside the function rather
+  than relying on the well-documented `CompositeMatcher` elimination behavior.
+- Each header criterion contributes its own score (3 per header), so matching
+  more headers naturally produces a higher total score. A map-based approach
+  would need to decide on a single combined score.
+
+##### Case sensitivity
+
+- **Header name**: Canonicalized via `http.CanonicalHeaderKey` before comparison.
+  This means `MatchHeaders("content-type", "application/json")` and
+  `MatchHeaders("Content-Type", "application/json")` behave identically. This
+  follows RFC 7230 section 3.2 which states header field names are
+  case-insensitive.
+- **Header value**: Exact, case-sensitive comparison. While some header values
+  have case-insensitive semantics (e.g., media type tokens in `Content-Type`),
+  the HTTP spec does not mandate case-insensitive values globally. Exact matching
+  is the safe default; case-insensitive value matching could be added as a
+  separate criterion in the future if needed.
+
+##### Matching logic
+
+The criterion performs two checks:
+
+1. **Request header check**: Look up `http.CanonicalHeaderKey(key)` in
+   `req.Header`. Check if `value` appears among the header's values.
+2. **Tape header check**: Look up `http.CanonicalHeaderKey(key)` in
+   `candidate.Request.Headers`. Check if `value` appears among the header's
+   values.
+
+Both must match for the criterion to return a positive score. This dual-match
+design (consistent with `MatchPathRegex`, ADR-12) ensures that:
+- A tape recorded with `Accept: application/vnd.api.v2+json` matches a request
+  with the same header value.
+- A tape recorded with `Accept: application/json` does NOT match a request with
+  `Accept: application/vnd.api.v2+json`, even though both share the same path.
+
+If the header is absent from either the request or the tape, the criterion
+returns 0.
+
+##### Score weight: 3
+
+| Criterion | Score | Rationale |
+|---|---|---|
+| `MatchMethod` | 1 | Low specificity — many tapes share a method. |
+| `MatchPath` | 2 | Exact path — high specificity. |
+| `MatchPathRegex` | 1 | Regex path — lower specificity than exact. |
+| `MatchRoute` | 1 | Scoping label. |
+| **`MatchHeaders`** | **3** | **Per header — moderate specificity.** |
+| `MatchQueryParams` | 4 | Significantly narrows candidates. |
+| `MatchBodyHash` | 8 | Most specific — uniquely identifies a request body. |
+
+Score 3 is correct because:
+- A single header match is more specific than a path match (score 2) but less
+  specific than query parameter matching (score 4, which checks all params at
+  once).
+- Multiple header criteria stack: two headers contribute 6, three contribute 9.
+  This naturally increases the total score as more headers are required, which is
+  the desired behavior — more constrained matches score higher.
+- Score 3 keeps the power-of-two-ish spacing from ADR-4. The progression is
+  1 (method) < 2 (path) < 3 (header) < 4 (query) < 8 (body hash).
+
+##### No error return
+
+Unlike `MatchPathRegex` (ADR-12), `MatchHeaders` takes plain string arguments
+that cannot be syntactically invalid. There is no fallible parsing step.
+Therefore the constructor returns `MatchCriterion` directly, consistent with
+`MatchMethod`, `MatchPath`, `MatchRoute`, and `MatchQueryParams`.
+
+##### Any-of semantics for multi-valued headers
+
+HTTP headers can have multiple values (either comma-separated in a single header
+line or via repeated header lines). Go's `http.Header` type stores these as a
+`[]string` slice. The criterion checks whether the specified `value` appears
+anywhere in the slice, rather than requiring it to be the only value. This
+handles real-world cases like:
+
+```
+Accept: text/html
+Accept: application/json
+```
+
+where `MatchHeaders("Accept", "application/json")` should match even though
+`text/html` is also present.
+
+##### Implementation sketch
+
+```go
+func MatchHeaders(key, value string) MatchCriterion {
+    canonicalKey := http.CanonicalHeaderKey(key)
+    return func(req *http.Request, candidate Tape) int {
+        if !headerContains(req.Header, canonicalKey, value) {
+            return 0
+        }
+        if !headerContains(candidate.Request.Headers, canonicalKey, value) {
+            return 0
+        }
+        return 3
+    }
+}
+
+// headerContains reports whether the header map contains the specified
+// canonical key with the specified value among its values.
+func headerContains(h http.Header, canonicalKey, value string) bool {
+    values := h[canonicalKey]
+    for _, v := range values {
+        if v == value {
+            return true
+        }
+    }
+    return false
+}
+```
+
+Key points:
+- `http.CanonicalHeaderKey` is called once at construction time, not per
+  evaluation. This avoids repeated string manipulation during matching.
+- Direct map access with the canonical key (`h[canonicalKey]`) is used instead of
+  `h.Get(key)` because `Get` only returns the first value, while we need to
+  check all values for multi-valued headers.
+- The `headerContains` helper is unexported and keeps the matching logic clean.
+
+#### Consequences
+
+- **New file changes**: `matcher.go` gains `MatchHeaders` and `headerContains`.
+  No new imports are needed beyond what already exists (`net/http` is already
+  imported).
+- **No breaking changes**: This is a purely additive change. `DefaultMatcher`
+  is not affected. Existing code continues to work unchanged.
+- **Test requirements**: `matcher_test.go` must cover: single header match,
+  multiple header criteria (AND semantics), case-insensitive header names,
+  missing header (no match), wrong header value (no match), and multi-valued
+  headers.
+- **Progressive matching preserved**: Header matching is opt-in. Users who do
+  not need it are unaffected. Users who need it add `MatchHeaders(...)` calls
+  to their `CompositeMatcher`.
+- **Composability**: `MatchHeaders` composes naturally with all existing criteria.
+  A typical advanced matcher might be:
+  `NewCompositeMatcher(MatchMethod(), MatchPath(), MatchHeaders("Accept", "..."), MatchQueryParams())`.
+- **Future extensions**: If substring or regex header value matching is needed in
+  the future, it can be added as a separate criterion (e.g.,
+  `MatchHeadersRegex(key, pattern string)`) following the same pattern as
+  `MatchPathRegex` (ADR-12). The exact-match default is the safe starting point.
+
+### ADR-14: MatchBodyFuzzy — Field-level body matching criterion
+
+**Date**: 2026-03-30
+**Issue**: #40
+**Status**: Accepted
+
+#### Context
+
+`MatchBodyHash` (ADR-4) compares the SHA-256 hash of the entire request body.
+This is maximally specific but brittle: if the request body contains fields
+that vary per invocation — timestamps, nonces, request IDs, CSRF tokens — the
+hash will never match a recorded fixture even though the "meaningful" fields
+are identical.
+
+Users need a way to say "match these specific body fields and ignore everything
+else." This is the body-matching analog of `MatchQueryParams`: compare a
+declared subset and ignore the rest.
+
+Key constraints:
+- Reuse the existing JSONPath-like path syntax (`$.field`, `$.nested.field`,
+  `$.array[*].field`) already established in `sanitizer.go` for
+  `RedactBodyPaths` and `FakeFields`.
+- Reuse the existing `parsePath`/`parsedPath`/`segment` types from
+  `sanitizer.go` to avoid duplicating path-parsing logic.
+- Both the incoming request body and the tape's stored `Request.Body` must be
+  unmarshaled as JSON for field-level comparison.
+- Non-JSON bodies must not cause a panic or error — the criterion should
+  return 0 (no match) gracefully, letting other criteria decide.
+- Stdlib only (L-03, L-04). No panics (L-11).
+
+#### Decision
+
+##### Public API (`matcher.go`)
+
+```go
+// MatchBodyFuzzy returns a MatchCriterion that compares specific fields in
+// the JSON request body between the incoming request and the candidate tape.
+// Only the fields at the specified paths are compared; all other fields are
+// ignored. This is useful when request bodies contain volatile fields
+// (timestamps, nonces, request IDs) that vary per invocation.
+//
+// Paths use the same JSONPath-like syntax as RedactBodyPaths and FakeFields:
+//   - $.field             -- top-level field
+//   - $.nested.field      -- nested field access
+//   - $.array[*].field    -- field within each element of an array
+//
+// Matching semantics:
+//   - Both bodies are unmarshaled as JSON. If either body is not valid JSON,
+//     the criterion returns 0 (no match).
+//   - For each specified path, the value is extracted from both the request
+//     and the tape body. If a path does not exist in both bodies, it is
+//     skipped (does not cause a mismatch).
+//   - If a path exists in both bodies, the extracted values must be
+//     deeply equal (compared via reflect.DeepEqual on the unmarshaled
+//     any values). If any compared field differs, the criterion returns 0.
+//   - If no paths are provided, or no paths match fields present in both
+//     bodies, the criterion returns 0 (no match — nothing to compare means
+//     no evidence of a match).
+//   - If at least one path matched and all matched fields are equal, the
+//     criterion returns its score.
+//
+// The request body is read fully, then restored (replaced with a new reader
+// over the same bytes) so subsequent criteria can read it again.
+//
+// Invalid or unsupported paths are silently ignored (same as RedactBodyPaths).
+//
+// Returns score 6 on match, 0 on mismatch.
+//
+// Example:
+//
+//	matcher := NewCompositeMatcher(
+//	    MatchMethod(),
+//	    MatchPath(),
+//	    MatchBodyFuzzy("$.action", "$.user.id", "$.items[*].sku"),
+//	)
+func MatchBodyFuzzy(paths ...string) MatchCriterion
+```
+
+##### Score weight: 6
+
+| Criterion | Score | Rationale |
+|---|---|---|
+| `MatchMethod` | 1 | Low specificity — many tapes share a method. |
+| `MatchPath` | 2 | More specific than method alone. |
+| `MatchHeaders` | 3 | Narrows by content negotiation / feature flags. |
+| `MatchQueryParams` | 4 | Significantly narrows candidates. |
+| **`MatchBodyFuzzy`** | **6** | **Partial body specificity — between query params and exact body hash.** |
+| `MatchBodyHash` | 8 | Most specific — uniquely identifies the full body. |
+
+Rationale for score 6:
+- Fuzzy body matching is more specific than query params (score 4) because it
+  inspects the actual request payload, which typically carries richer
+  information than URL parameters.
+- It is less specific than `MatchBodyHash` (score 8) because it deliberately
+  ignores some fields. A full body hash match is stronger evidence.
+- Score 6 sits between 4 and 8, preserving the power-of-two-ish spacing from
+  ADR-4. Importantly, `MatchBodyFuzzy` alone (6) cannot outscore
+  `MatchBodyHash` (8), so an exact body match always wins when both criteria
+  are present in the same `CompositeMatcher`.
+- Users should choose one of `MatchBodyFuzzy` or `MatchBodyHash`, not both.
+  If both are present, `MatchBodyHash` will eliminate candidates whose full
+  body differs (score 0), making `MatchBodyFuzzy` redundant. This is safe
+  but wasteful. The godoc should note this.
+
+##### Internal implementation (`matcher.go`)
+
+```go
+func MatchBodyFuzzy(paths ...string) MatchCriterion {
+    // Parse all paths at construction time (reuses parsePath from sanitizer.go).
+    var parsed []parsedPath
+    for _, p := range paths {
+        if pp, ok := parsePath(p); ok {
+            parsed = append(parsed, pp)
+        }
+    }
+
+    return func(req *http.Request, candidate Tape) int {
+        if len(parsed) == 0 {
+            return 0
+        }
+
+        // Read and restore the incoming request body.
+        var reqBody []byte
+        if req.Body != nil {
+            bodyBytes, err := io.ReadAll(req.Body)
+            if err != nil {
+                return 0
+            }
+            req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+            reqBody = bodyBytes
+        }
+
+        // Unmarshal both bodies.
+        var reqData, tapeData any
+        if err := json.Unmarshal(reqBody, &reqData); err != nil {
+            return 0
+        }
+        if err := json.Unmarshal(candidate.Request.Body, &tapeData); err != nil {
+            return 0
+        }
+
+        // Compare specified fields.
+        matched := 0
+        for _, p := range parsed {
+            reqVal, reqOk := extractAtPath(reqData, p.segments)
+            tapeVal, tapeOk := extractAtPath(tapeData, p.segments)
+
+            if !reqOk || !tapeOk {
+                // Path doesn't exist in one or both — skip, not a mismatch.
+                continue
+            }
+
+            if !reflect.DeepEqual(reqVal, tapeVal) {
+                return 0 // field exists in both but values differ — eliminate.
+            }
+            matched++
+        }
+
+        if matched == 0 {
+            return 0 // no fields compared — no evidence of match.
+        }
+        return 6
+    }
+}
+```
+
+##### New helper: `extractAtPath` (`matcher.go`)
+
+```go
+// extractAtPath traverses the JSON structure following the given segments
+// and returns the value at the leaf. Returns (value, true) if the path
+// exists, or (nil, false) if any segment is missing or the structure does
+// not match (e.g., expected object but found array).
+//
+// For wildcard segments (array[*].field), it collects the matching values
+// from all array elements into a []any slice and returns that.
+func extractAtPath(data any, segments []segment) (any, bool)
+```
+
+Implementation outline:
+- Walk the `segments` slice, at each step narrowing `data`.
+- For a non-wildcard segment: assert `data` is `map[string]any`, look up
+  `seg.key`. If missing, return `(nil, false)`.
+- For a wildcard segment: assert `data` is `map[string]any`, look up
+  `seg.key`, assert the result is `[]any`, then recurse into each element
+  with the remaining segments. Collect the results into a `[]any` for
+  comparison. If any element is missing the remaining path, return
+  `(nil, false)` (all-or-nothing semantics for arrays).
+- At the leaf (no remaining segments), return `(data, true)`.
+
+This helper mirrors `redactAtPath` and `fakeAtPath` from `sanitizer.go` but
+extracts rather than mutates. It belongs in `matcher.go` because it is
+matching infrastructure, not sanitization.
+
+##### Why `reflect.DeepEqual`
+
+`reflect.DeepEqual` is used to compare the extracted `any` values because:
+- JSON unmarshaling produces nested `map[string]any`, `[]any`, `string`,
+  `float64`, `bool`, and `nil`. `reflect.DeepEqual` handles all of these
+  correctly, including nested structures and arrays.
+- It is stdlib (`reflect` package), consistent with the zero-dependency rule.
+- The comparison happens on already-unmarshaled data, so the cost is the
+  comparison itself, not serialization. For the typical field sizes in API
+  bodies (strings, numbers, small objects), this is negligible.
+- Alternative: marshal both values back to JSON bytes and compare. This is
+  more work, introduces ordering concerns for maps, and is less readable.
+  `reflect.DeepEqual` is the idiomatic Go approach here.
+
+##### New import: `reflect`
+
+`matcher.go` will gain `import "reflect"` for `reflect.DeepEqual`. This is
+stdlib, so it does not violate the zero-dependency rule.
+
+##### Reuse of `parsePath` / `parsedPath` / `segment`
+
+These types and functions are already defined in `sanitizer.go` and are
+unexported (lowercase). Since httptape is a single flat package, they are
+directly accessible from `matcher.go` without any refactoring. No code needs
+to move.
+
+This is the intended benefit of the single-package architecture: internal
+types are shared across files without needing `internal/` sub-packages.
+
+#### Consequences
+
+- **New file changes**: `matcher.go` gains `MatchBodyFuzzy` and the unexported
+  `extractAtPath` helper. New imports: `encoding/json`, `reflect`. The existing
+  `io` and `bytes` imports are already present (used by `MatchBodyHash`).
+- **No breaking changes**: Purely additive. `DefaultMatcher` is unaffected.
+  Existing code continues to work unchanged.
+- **Test requirements**: `matcher_test.go` must cover:
+  - Match on single body field, ignoring other differences.
+  - Match on multiple body fields.
+  - Match on nested fields (`$.nested.field`).
+  - Match on array element fields (`$.array[*].field`).
+  - No match when a specified field value differs.
+  - Non-JSON body gracefully returns 0 (no match).
+  - Empty paths list returns 0.
+  - Path exists in request but not in tape (skipped, not mismatch).
+  - Path exists in tape but not in request (skipped, not mismatch).
+  - Both bodies empty: returns 0 (nothing to compare).
+  - Composability: works alongside `MatchMethod`, `MatchPath`, `MatchHeaders`
+    in a `CompositeMatcher`.
+- **Progressive matching preserved**: Fuzzy body matching is opt-in. Users who
+  do not need it are unaffected. Users who need it add
+  `MatchBodyFuzzy("$.action", "$.user.id")` to their `CompositeMatcher`.
+- **Mutual exclusivity note**: Using both `MatchBodyFuzzy` and `MatchBodyHash`
+  in the same `CompositeMatcher` is safe but semantically redundant. If
+  `MatchBodyHash` passes (exact match), `MatchBodyFuzzy` will also pass. If
+  `MatchBodyHash` fails, the candidate is already eliminated. The godoc for
+  `MatchBodyFuzzy` should note this.
+- **Performance**: Each evaluation unmarshals both the request body and the
+  tape body as JSON. For typical API bodies (a few KB), this is fast. For
+  very large bodies, users should prefer `MatchBodyHash` or limit the number
+  of candidates via other criteria (method, path) that short-circuit first.
+  The `CompositeMatcher` already evaluates criteria in order and short-circuits
+  on score 0, so placing `MatchMethod` and `MatchPath` before `MatchBodyFuzzy`
+  naturally limits the number of JSON unmarshalings.
+
+---
+
+### ADR-15: Concurrent safety audit
+
+**Date**: 2026-03-30
+**Issue**: #41
+**Status**: Accepted
+
+#### Context
+
+httptape types will be used in concurrent Go programs: HTTP servers, test suites
+with `t.Parallel()`, and production middleware with many goroutines hitting the
+same Recorder or Server simultaneously. All public types must be safe for
+concurrent use without external synchronization. Issue #41 requires a full audit.
+
+#### Audit results
+
+##### Already safe
+
+1. **MemoryStore** — Uses `sync.RWMutex`. Read operations (`Load`, `List`) take
+   `RLock`; write operations (`Save`, `Delete`) take full `Lock`. All values are
+   deep-copied on read and write via `deepCopyTape`, preventing aliasing between
+   caller-held data and store internals. **Verdict: safe.**
+
+2. **FileStore** — Uses `sync.RWMutex` (same pattern as MemoryStore). Writes use
+   atomic temp-file-then-rename. Safe for concurrent use within a single process.
+   Not safe for multi-process concurrent access (out of scope per issue #41).
+   **Verdict: safe (single-process).**
+
+3. **Server** — All fields (`store`, `matcher`, `fallbackStatus`, `fallbackBody`,
+   `onNoMatch`) are set during construction and never mutated afterward. The
+   `ServeHTTP` method is read-only with respect to Server's own state; it
+   delegates to `Store.List` and `Matcher.Match`, whose safety is guaranteed by
+   their own contracts. Each `*http.Request` is distinct per HTTP connection, so
+   there is no aliasing of request bodies across goroutines.
+   **Verdict: safe (immutable after construction).**
+
+4. **Pipeline (Sanitizer)** — Immutable after construction. `NewPipeline` copies
+   the `funcs` slice. `Sanitize` iterates the slice without modification. Each
+   `SanitizeFunc` (RedactHeaders, RedactBodyPaths, FakeFields) operates on
+   copies of the Tape's data (headers are cloned, bodies are unmarshaled into
+   fresh structures). **Verdict: safe.**
+
+5. **CompositeMatcher** — Immutable after construction. The `criteria` slice is
+   set once in `NewCompositeMatcher` and never modified. `Match` iterates
+   read-only. Individual `MatchCriterion` closures capture only immutable state
+   (compiled regexes, pre-parsed paths, constant strings). `MatchBodyHash` and
+   `MatchBodyFuzzy` read and restore `req.Body`, but this is safe because each
+   HTTP request is processed by one goroutine at a time (standard `net/http`
+   contract). **Verdict: safe.**
+
+6. **ExportBundle / ImportBundle** — Package-level functions with no shared
+   mutable state. Safety depends entirely on the Store implementation passed in.
+   **Verdict: safe (stateless functions).**
+
+7. **Core types (Tape, RecordedReq, RecordedResp)** — Pure value types with no
+   methods that mutate shared state. Thread safety is the responsibility of the
+   container (Store). **Verdict: safe (pure data).**
+
+##### Gap identified: Recorder close/send race
+
+**Recorder** uses `atomic.Bool` (`closed`) as a guard in `RoundTrip` to avoid
+sending on a closed channel. However, there is a **TOCTOU race** between the
+`closed.Load()` check and the channel send:
+
+```
+Goroutine A (RoundTrip):          Goroutine B (Close):
+  if r.closed.Load() → false
+                                    r.closed.Store(true)
+                                    close(r.tapeCh)     // channel closed
+  r.tapeCh <- tape                  // PANIC: send on closed channel
+```
+
+The `select` with a `default` case does NOT protect against send-on-closed-channel.
+Go's `select` can choose the `case r.tapeCh <- tape` branch even if the channel
+was closed between the `closed.Load()` check and the `select` evaluation.
+
+**Fix**: Replace the `atomic.Bool` + `close(tapeCh)` pattern with a
+`sync.Mutex`-guarded approach, or use a "poison pill" sentinel (send a zero-value
+Tape and close-after-drain). The recommended fix:
+
+```go
+// In Recorder, add a dedicated mutex for the close/send coordination:
+sendMu sync.Mutex
+
+// In RoundTrip (async branch):
+r.sendMu.Lock()
+if r.closed.Load() {
+    r.sendMu.Unlock()
+    // recorder closed — drop tape silently
+} else {
+    select {
+    case r.tapeCh <- tape:
+    default:
+        if r.onError != nil {
+            r.onError(fmt.Errorf("httptape: recorder buffer full, tape dropped"))
+        }
+    }
+    r.sendMu.Unlock()
+}
+
+// In Close:
+r.closeOnce.Do(func() {
+    r.sendMu.Lock()
+    r.closed.Store(true)
+    close(r.tapeCh)
+    r.sendMu.Unlock()
+    <-r.done
+})
+```
+
+This ensures that `close(r.tapeCh)` never happens while another goroutine is
+between the `closed` check and the channel send. The mutex is held only briefly
+(no I/O under lock).
+
+#### Decision
+
+1. **MemoryStore, FileStore, Server, Pipeline, CompositeMatcher, Bundle functions**:
+   already concurrent-safe. No code changes needed — only godoc additions.
+
+2. **Recorder**: Fix the TOCTOU race between `RoundTrip` and `Close` by adding a
+   `sendMu sync.Mutex` that coordinates the closed-check-then-send sequence with
+   the close-channel sequence. Keep `atomic.Bool` for the fast-path read in the
+   non-async code path and for the pre-check before acquiring the mutex.
+
+3. **Godoc guarantees to add**: Every public type must document its concurrency
+   contract in its godoc comment. Specifically:
+   - `MemoryStore`: "Safe for concurrent use by multiple goroutines."
+   - `FileStore`: "Safe for concurrent use by multiple goroutines within a single
+     process. Not safe for multi-process concurrent access."
+   - `Recorder`: "Safe for concurrent use by multiple goroutines. RoundTrip may
+     be called from multiple goroutines simultaneously. Close must be called
+     exactly once when recording is complete."
+   - `Server`: "Safe for concurrent use by multiple goroutines. All fields are
+     immutable after construction."
+   - `Pipeline`: "Safe for concurrent use — immutable after construction."
+   - `CompositeMatcher`: "Safe for concurrent use — immutable after construction."
+
+4. **Race tests to add** (in the Dev phase):
+   - Multiple goroutines calling `MemoryStore.Save` and `MemoryStore.Load`
+     concurrently.
+   - Multiple goroutines calling `FileStore.Save` and `FileStore.Load`
+     concurrently.
+   - Multiple goroutines calling `Recorder.RoundTrip` concurrently, then calling
+     `Close`.
+   - Multiple goroutines calling `Server.ServeHTTP` concurrently.
+   - All tests must pass under `go test -race ./...`.
+
+#### Consequences
+
+- **Recorder gains one new field**: `sendMu sync.Mutex`. This is a small addition
+  with no API impact.
+- **No breaking changes**: All fixes are internal. The public API is unchanged.
+- **Performance impact**: The `sendMu` mutex in the async path adds minimal
+  overhead — it is held only for the duration of a non-blocking channel send
+  (nanoseconds). The fast-path `closed.Load()` check before acquiring the mutex
+  avoids contention after Close has been called.
+- **Godoc updates**: Every public type gets an explicit concurrency guarantee.
+  This is documentation-only and helps users reason about thread safety.
+- **Test coverage**: Race tests validate correctness under `-race`. These tests
+  are primarily exercised by the CI pipeline (`go test -race ./...`).
+
+---
+
+### ADR-16: Performance benchmark suite
+
+**Date**: 2026-03-30
+**Issue**: #42
+**Status**: Accepted
+
+#### Context
+
+httptape will be used in two performance-sensitive positions: (1) as a production
+middleware via `Recorder` wrapping an `http.RoundTripper`, and (2) as a test mock
+via `Server` implementing `http.Handler`. Users need documented performance
+characteristics to decide whether httptape is acceptable for their use case.
+
+Issue #42 requests a comprehensive benchmark suite using Go's `testing.B`
+framework. The goal is measurement, not optimization -- benchmarks establish
+baselines so regressions can be detected and users can make informed decisions.
+
+Performance targets (informational, not hard gates):
+- Recorder overhead per request in async mode: **< 50us** added latency
+- Server response latency for exact match lookup: **< 1ms**
+- Sanitizer throughput for large JSON bodies: measurable at 1KB, 10KB, 100KB
+- FileStore write throughput: measurable sequential and concurrent
+
+#### Decision
+
+##### Benchmark organization
+
+Benchmarks live in `*_test.go` files alongside the code they measure, following
+Go convention. Each benchmark file covers one component:
+
+| File | Benchmarks |
+|---|---|
+| `recorder_test.go` | Recorder hot-path overhead |
+| `server_test.go` | Server response latency |
+| `sanitizer_test.go` | Sanitizer pipeline throughput |
+| `store_file_test.go` | FileStore write throughput |
+| `matcher_test.go` | Matcher performance with varying fixture counts |
+
+##### Benchmark 1: Recorder overhead (`recorder_test.go`)
+
+Measures the added latency of `Recorder.RoundTrip` beyond the inner transport's
+own latency. Uses a no-op `http.RoundTripper` stub that returns a canned response
+immediately, so the benchmark isolates recorder overhead (body capture, tape
+construction, sanitizer, channel send).
+
+```go
+// BenchmarkRecorderRoundTrip_Async measures the overhead of async recording.
+// The inner transport is a no-op stub returning a fixed response.
+// Target: < 50us per operation.
+func BenchmarkRecorderRoundTrip_Async(b *testing.B)
+
+// BenchmarkRecorderRoundTrip_Sync measures sync recording overhead for comparison.
+func BenchmarkRecorderRoundTrip_Sync(b *testing.B)
+```
+
+Implementation notes:
+- The no-op transport stub (`noopTransport`) returns a pre-built `*http.Response`
+  with a small body (e.g., `{"ok":true}`) and status 200.
+- The `MemoryStore` is used as the store (avoids filesystem noise).
+- A no-op sanitizer (default `NewPipeline()`) is used to measure the baseline.
+  A separate sub-benchmark adds `RedactHeaders()` to show sanitizer cost.
+- The recorder is created once in the benchmark setup; `b.ResetTimer()` is called
+  before the loop.
+- `b.ReportAllocs()` is called to track allocation overhead.
+- After the loop, `recorder.Close()` is called to flush the channel.
+
+Sub-benchmarks:
+- `BenchmarkRecorderRoundTrip_Async/NoSanitizer` -- baseline
+- `BenchmarkRecorderRoundTrip_Async/WithRedactHeaders` -- adds header redaction
+- `BenchmarkRecorderRoundTrip_Async/SmallBody` -- 100-byte request+response body
+- `BenchmarkRecorderRoundTrip_Async/MediumBody` -- 10KB request+response body
+
+##### Benchmark 2: Server response latency (`server_test.go`)
+
+Measures the end-to-end latency of `Server.ServeHTTP` from request arrival to
+response write completion. Uses `httptest.NewRecorder` (the stdlib test
+`ResponseRecorder`, not httptape's `Recorder`) to capture the response.
+
+```go
+// BenchmarkServerServeHTTP_ExactMatch measures response latency with exact match.
+// Target: < 1ms per operation.
+func BenchmarkServerServeHTTP_ExactMatch(b *testing.B)
+```
+
+Implementation notes:
+- Pre-populate `MemoryStore` with a known tape matching the benchmark request.
+- Use `DefaultMatcher()` (method + path).
+- Create a fresh `*http.Request` via `httptest.NewRequest` each iteration.
+- Use `httptest.NewRecorder()` each iteration to capture the response.
+- Vary the number of candidate tapes to show scaling behavior.
+
+Sub-benchmarks:
+- `BenchmarkServerServeHTTP_ExactMatch/1tape` -- single tape in store
+- `BenchmarkServerServeHTTP_ExactMatch/10tapes` -- 10 tapes, one matching
+- `BenchmarkServerServeHTTP_ExactMatch/100tapes` -- 100 tapes, one matching
+- `BenchmarkServerServeHTTP_ExactMatch/1000tapes` -- 1000 tapes, one matching
+
+##### Benchmark 3: Sanitizer throughput (`sanitizer_test.go`)
+
+Measures the throughput of the sanitization pipeline on JSON bodies of varying
+sizes. This isolates the JSON unmarshal/redact/marshal cycle.
+
+```go
+// BenchmarkSanitizer_RedactBodyPaths measures RedactBodyPaths throughput.
+func BenchmarkSanitizer_RedactBodyPaths(b *testing.B)
+
+// BenchmarkSanitizer_FakeFields measures FakeFields throughput (includes HMAC).
+func BenchmarkSanitizer_FakeFields(b *testing.B)
+
+// BenchmarkSanitizer_FullPipeline measures a realistic pipeline with
+// RedactHeaders + RedactBodyPaths + FakeFields combined.
+func BenchmarkSanitizer_FullPipeline(b *testing.B)
+```
+
+Implementation notes:
+- Generate synthetic JSON bodies at construction time for each size tier:
+  1KB, 10KB, 100KB. Use nested objects with arrays to exercise the path
+  traversal (`$.users[*].email`, `$.users[*].id`).
+- Build a `Tape` with the synthetic body for both request and response.
+- Call `pipeline.Sanitize(tape)` in the hot loop.
+- `b.SetBytes(int64(len(body)))` to report throughput in bytes/sec.
+- `b.ReportAllocs()` for allocation tracking.
+
+Sub-benchmarks by body size:
+- `BenchmarkSanitizer_RedactBodyPaths/1KB`
+- `BenchmarkSanitizer_RedactBodyPaths/10KB`
+- `BenchmarkSanitizer_RedactBodyPaths/100KB`
+- (Same pattern for FakeFields and FullPipeline.)
+
+Body generation helper:
+```go
+// generateJSONBody creates a JSON object with `n` user entries, each containing
+// email, id, name, and nested tokens array. Returns the JSON bytes and the
+// approximate size label.
+func generateJSONBody(n int) []byte
+```
+
+The helper produces structure like:
+```json
+{
+  "users": [
+    {"email": "user0@test.com", "id": 1000, "name": "User 0", "tokens": [{"value": "tok0"}]},
+    ...
+  ]
+}
+```
+
+Scale `n` to hit target sizes: ~5 users for 1KB, ~60 users for 10KB, ~600 users
+for 100KB.
+
+##### Benchmark 4: FileStore write throughput (`store_file_test.go`)
+
+Measures `FileStore.Save` throughput including JSON marshaling and atomic
+file write (temp + rename).
+
+```go
+// BenchmarkFileStore_Save measures sequential write throughput.
+func BenchmarkFileStore_Save(b *testing.B)
+
+// BenchmarkFileStore_Save_Concurrent measures concurrent write throughput.
+func BenchmarkFileStore_Save_Concurrent(b *testing.B)
+```
+
+Implementation notes:
+- Use `b.TempDir()` for the fixture directory (auto-cleaned).
+- Create a new `FileStore` with `WithDirectory(b.TempDir())`.
+- Build a template tape once; vary the ID per iteration (using `fmt.Sprintf`
+  or `strconv.Itoa`) to avoid overwriting the same file.
+- For the concurrent benchmark, use `b.RunParallel` with `testing.PB`.
+- `b.ReportAllocs()` for allocation tracking.
+
+Sub-benchmarks:
+- `BenchmarkFileStore_Save/SmallTape` -- ~200-byte JSON body
+- `BenchmarkFileStore_Save/MediumTape` -- ~10KB JSON body
+- `BenchmarkFileStore_Save_Concurrent/SmallTape`
+- `BenchmarkFileStore_Save_Concurrent/MediumTape`
+
+##### Benchmark 5: Matcher performance (`matcher_test.go`)
+
+Measures `CompositeMatcher.Match` with varying numbers of candidate tapes.
+This is the hot path in `Server.ServeHTTP` -- the matcher must scan all
+candidates to find the best match.
+
+```go
+// BenchmarkCompositeMatcher_Match measures matching with DefaultMatcher criteria.
+func BenchmarkCompositeMatcher_Match(b *testing.B)
+```
+
+Implementation notes:
+- Pre-generate candidate slices of varying sizes (10, 100, 1000, 5000).
+- Place the matching tape at a random position (not always first or last)
+  to avoid best-case/worst-case bias. Use a fixed seed for reproducibility.
+- Use `DefaultMatcher()` (MatchMethod + MatchPath) as the baseline.
+- Add sub-benchmarks with `MatchQueryParams()` and `MatchBodyHash()` to
+  show the cost of additional criteria.
+
+Sub-benchmarks:
+- `BenchmarkCompositeMatcher_Match/Default/10candidates`
+- `BenchmarkCompositeMatcher_Match/Default/100candidates`
+- `BenchmarkCompositeMatcher_Match/Default/1000candidates`
+- `BenchmarkCompositeMatcher_Match/Default/5000candidates`
+- `BenchmarkCompositeMatcher_Match/WithQueryAndBody/100candidates`
+- `BenchmarkCompositeMatcher_Match/WithQueryAndBody/1000candidates`
+
+##### Helper types for benchmarks
+
+```go
+// noopTransport is an http.RoundTripper that returns a fixed response without
+// making any network call. Used to isolate recorder overhead in benchmarks.
+type noopTransport struct {
+    response *http.Response
+}
+
+func (t *noopTransport) RoundTrip(*http.Request) (*http.Response, error) {
+    // Return a fresh body reader each call to avoid consumed-body issues.
+    body := []byte(`{"ok":true}`)
+    return &http.Response{
+        StatusCode: t.response.StatusCode,
+        Header:     t.response.Header.Clone(),
+        Body:       io.NopCloser(bytes.NewReader(body)),
+    }, nil
+}
+```
+
+This type is defined in `recorder_test.go` (unexported, test-only).
+
+##### CI integration
+
+Benchmarks run in CI via `go test -bench=. -benchmem -count=1 ./...`. Results
+are informational only -- benchmark failures do not block merges. A future
+enhancement could use `benchstat` for regression detection, but that is out of
+scope for this issue.
+
+##### No new production code
+
+Per the issue scope, this ADR adds only test files (`*_test.go`). No production
+code changes are needed. All benchmark helpers (noopTransport, generateJSONBody)
+are unexported and test-only.
+
+#### Consequences
+
+- **Five benchmark files** gain new `Benchmark*` functions. No new files are
+  created -- all benchmarks go into existing `*_test.go` files.
+- **Reproducible baselines**: `b.ReportAllocs()` and `b.SetBytes()` provide
+  stable metrics across runs. Results can be compared using `benchstat`.
+- **CI visibility**: Benchmark output appears in CI logs. Developers can spot
+  regressions by comparing against previous runs.
+- **No performance optimization**: This ADR is measurement-only. If benchmarks
+  reveal performance issues, separate issues should be filed for optimization.
+- **Memory allocation tracking**: `b.ReportAllocs()` on all benchmarks provides
+  data for future allocation optimization work (explicitly out of scope per
+  issue #42, but the data will be collected).
+- **MemoryStore used for isolation**: Recorder and Server benchmarks use
+  `MemoryStore` to avoid filesystem overhead skewing results. FileStore has its
+  own dedicated benchmarks that intentionally include filesystem overhead.
