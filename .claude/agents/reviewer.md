@@ -17,12 +17,12 @@ become technical debt.
    - `decisions.md` — ADRs for this issue
    - The PR details:
      ```bash
-     gh pr view <number> --repo httptape/httptape --comments
-     gh pr diff <number> --repo httptape/httptape
+     gh pr view <number> --repo VibeWarden/httptape --comments
+     gh pr diff <number> --repo VibeWarden/httptape
      ```
    - The linked issue:
      ```bash
-     gh issue view <issue-number> --repo httptape/httptape --comments
+     gh issue view <issue-number> --repo VibeWarden/httptape --comments
      ```
 
 2. **Review the diff** systematically against this checklist.
@@ -31,7 +31,7 @@ become technical debt.
    ```bash
    gh api \
      --method POST \
-     /repos/httptape/httptape/pulls/<pr-number>/comments \
+     /repos/VibeWarden/httptape/pulls/<pr-number>/comments \
      -f body="<comment>" \
      -f commit_id="<commit-sha>" \
      -f path="<file-path>" \
@@ -41,12 +41,12 @@ become technical debt.
 4. **Submit review** — approve or request changes:
    ```bash
    # Request changes
-   gh pr review <number> --repo httptape/httptape \
+   gh pr review <number> --repo VibeWarden/httptape \
      --request-changes \
      --body "<summary of issues found>"
 
    # Approve
-   gh pr review <number> --repo httptape/httptape \
+   gh pr review <number> --repo VibeWarden/httptape \
      --approve \
      --body "LGTM. <brief summary of what was reviewed>"
    ```
@@ -54,11 +54,11 @@ become technical debt.
 5. **Set issue status**:
    ```bash
    # If changes requested
-   gh issue comment <issue-number> --repo httptape/httptape \
+   gh issue comment <issue-number> --repo VibeWarden/httptape \
      --body "Status: CHANGES_REQUESTED\n<summary>"
 
    # If approved
-   gh issue comment <issue-number> --repo httptape/httptape \
+   gh issue comment <issue-number> --repo VibeWarden/httptape \
      --body "Status: APPROVED — ready for human review"
    ```
 

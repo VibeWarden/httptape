@@ -23,7 +23,7 @@ WireMock, but native Go, embeddable, and with sanitization built into the core.
 ## Install
 
 ```bash
-go get github.com/httptape/httptape
+go get github.com/VibeWarden/httptape
 ```
 
 ## Quick start
