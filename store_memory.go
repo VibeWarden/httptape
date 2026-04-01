@@ -7,8 +7,10 @@ import (
 	"sync"
 )
 
-// MemoryStore is an in-memory Store implementation. It is safe for concurrent use.
+// MemoryStore is an in-memory Store implementation.
 // Intended primarily for testing, but usable in production for ephemeral recordings.
+//
+// MemoryStore is safe for concurrent use by multiple goroutines.
 type MemoryStore struct {
 	mu    sync.RWMutex
 	tapes map[string]Tape // keyed by Tape.ID

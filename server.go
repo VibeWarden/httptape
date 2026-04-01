@@ -9,7 +9,8 @@ import (
 // and writes the recorded response. If no match is found, it returns
 // a configurable fallback status code.
 //
-// Server is safe for concurrent use.
+// Server is safe for concurrent use by multiple goroutines. All fields are
+// immutable after construction.
 type Server struct {
 	store          Store
 	matcher        Matcher

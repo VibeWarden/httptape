@@ -230,6 +230,8 @@ func MatchBodyHash() MatchCriterion {
 // If no candidates survive all criteria, CompositeMatcher returns (Tape{}, false).
 // If multiple candidates have the same highest score, the first one in the
 // candidates slice wins (stable ordering).
+//
+// CompositeMatcher is safe for concurrent use — immutable after construction.
 type CompositeMatcher struct {
 	criteria []MatchCriterion
 }

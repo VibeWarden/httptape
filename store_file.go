@@ -16,7 +16,11 @@ import (
 var ErrInvalidID = errors.New("httptape: invalid tape ID")
 
 // FileStore is a filesystem-backed Store implementation. Each tape is persisted
-// as a single JSON file. Safe for concurrent use within a single process.
+// as a single JSON file.
+//
+// FileStore is safe for concurrent use by multiple goroutines within a single
+// process. It is not safe for multi-process concurrent access to the same
+// directory.
 type FileStore struct {
 	dir string // base directory for fixtures
 	mu  sync.RWMutex

@@ -89,6 +89,9 @@ func WithSince(t time.Time) ExportOption {
 // in memory. The caller must read the reader to completion or cancel the
 // context to release resources.
 //
+// ExportBundle is safe for concurrent use — it is a stateless function.
+// Concurrent safety of the underlying Store is the Store's responsibility.
+//
 // Bundle layout:
 //
 //	manifest.json          — bundle metadata (see Manifest type)
@@ -197,6 +200,9 @@ func writeBundle(ctx context.Context, w io.Writer, tapes []Tape, cfg exportConfi
 
 // ImportBundle imports tapes from a tar.gz bundle into the given store.
 // The bundle must have been produced by ExportBundle (see Manifest for the format).
+//
+// ImportBundle is safe for concurrent use — it is a stateless function.
+// Concurrent safety of the underlying Store is the Store's responsibility.
 //
 // Merge strategy: fixtures in the bundle overwrite any existing fixtures with
 // the same ID in the store. Fixtures already in the store whose IDs are not
