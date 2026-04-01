@@ -27,6 +27,10 @@ type Sanitizer interface {
 // By default, recording is asynchronous — tapes are sent to a buffered channel
 // and a background goroutine drains them to the store. Call Close to flush
 // pending recordings and release resources.
+//
+// Recorder is safe for concurrent use by multiple goroutines. RoundTrip may be
+// called from multiple goroutines simultaneously. Close must be called exactly
+// once when recording is complete.
 type Recorder struct {
 	transport http.RoundTripper // inner transport to delegate to
 	store     Store             // where to persist tapes
@@ -39,6 +43,7 @@ type Recorder struct {
 	onError   func(error)       // callback for async write errors; defaults to no-op
 
 	// async internals
+	sendMu    sync.Mutex   // coordinates closed-check-then-send with close-channel
 	closed    atomic.Bool  // set to true when Close is called; guards against send-on-closed-channel
 	tapeCh    chan Tape     // buffered channel for async mode
 	done      chan struct{} // closed when background goroutine exits
@@ -241,14 +246,21 @@ func (r *Recorder) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	// Persist the tape.
 	if r.async {
-		select {
-		case r.tapeCh <- tape:
-			// sent
-		default:
-			// channel full — drop tape, call onError if set
-			if r.onError != nil {
-				r.onError(fmt.Errorf("httptape: recorder buffer full, tape dropped"))
+		r.sendMu.Lock()
+		if r.closed.Load() {
+			r.sendMu.Unlock()
+			// recorder closed — drop tape silently
+		} else {
+			select {
+			case r.tapeCh <- tape:
+				// sent
+			default:
+				// channel full — drop tape, call onError if set
+				if r.onError != nil {
+					r.onError(fmt.Errorf("httptape: recorder buffer full, tape dropped"))
+				}
 			}
+			r.sendMu.Unlock()
 		}
 	} else {
 		saveErr := r.store.Save(req.Context(), tape)
@@ -270,8 +282,10 @@ func (r *Recorder) Close() error {
 		return nil
 	}
 	r.closeOnce.Do(func() {
+		r.sendMu.Lock()
 		r.closed.Store(true)
 		close(r.tapeCh)
+		r.sendMu.Unlock()
 		<-r.done
 	})
 	return nil
