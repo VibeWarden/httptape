@@ -34,12 +34,20 @@ func (f MatcherFunc) Match(req *http.Request, candidates []Tape) (Tape, bool) {
 // URL path. It returns the first candidate whose method and URL path are
 // equal to the incoming request's method and URL path.
 //
+// The tape's URL (which is stored as a full URL string, e.g.,
+// "https://example.com/path") is parsed to extract only the path component
+// for comparison against the incoming request's URL.Path.
+//
 // This is intentionally minimal. For advanced matching (headers, body,
 // query params, regex), use CompositeMatcher or DefaultMatcher.
 func ExactMatcher() Matcher {
 	return MatcherFunc(func(req *http.Request, candidates []Tape) (Tape, bool) {
 		for _, t := range candidates {
-			if t.Request.Method == req.Method && t.Request.URL == req.URL.Path {
+			parsed, err := url.Parse(t.Request.URL)
+			if err != nil {
+				continue
+			}
+			if t.Request.Method == req.Method && parsed.Path == req.URL.Path {
 				return t, true
 			}
 		}
@@ -197,9 +205,20 @@ func MatchQueryParams() MatchCriterion {
 //
 // The request body is read fully, then restored (replaced with a new reader
 // over the same bytes) so subsequent handlers or criteria can read it again.
+//
+// Performance note: the body is re-read and the SHA-256 hash is recomputed
+// for each candidate tape. For large candidate sets, pre-computing the hash
+// once before the candidate loop would be more efficient. This is acceptable
+// for v1 (see ADR-4) but should be optimized if matching performance becomes
+// a bottleneck.
+//
+// TODO: pre-compute request body hash once before candidate iteration.
 func MatchBodyHash() MatchCriterion {
 	return func(req *http.Request, candidate Tape) int {
 		// Compute hash of incoming request body.
+		// NOTE: This recomputes the hash per candidate. The body bytes are
+		// cached in memory after the first read (via bytes.NewReader), but
+		// the SHA-256 hash is recomputed each time. See TODO above.
 		var reqHash string
 		if req.Body != nil {
 			bodyBytes, err := io.ReadAll(req.Body)
@@ -226,6 +245,25 @@ func MatchBodyHash() MatchCriterion {
 // return a positive score for a candidate, the candidate's total score is
 // the sum of all criterion scores. If any criterion returns 0 for a
 // candidate, that candidate is eliminated.
+//
+// Score weight table for built-in criteria:
+//
+//	MatchMethod:      1
+//	MatchPath:        2
+//	MatchRoute:       1
+//	MatchPathRegex:   1
+//	MatchHeaders:     3
+//	MatchQueryParams: 4
+//	MatchBodyFuzzy:   6
+//	MatchBodyHash:    8
+//
+// The original design (ADR-4) used powers-of-two-ish weights so each
+// higher-specificity criterion dominates all lower ones combined. Later
+// additions (MatchHeaders=3, MatchBodyFuzzy=6) create a gap where
+// MatchQueryParams(4) + MatchHeaders(3) = 7 > MatchBodyFuzzy(6). This is
+// acceptable for practical use — body-fuzzy matches are typically used
+// without query-param matching — but the strict dominance property no
+// longer holds perfectly.
 //
 // If no candidates survive all criteria, CompositeMatcher returns (Tape{}, false).
 // If multiple candidates have the same highest score, the first one in the

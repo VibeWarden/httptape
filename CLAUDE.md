@@ -50,24 +50,31 @@ License: Apache 2.0
 ```
 httptape/
   tape.go              # Core Tape type and related types
-  recorder.go          # RoundTripper wrapper for recording
+  tape_test.go
+  recorder.go          # RoundTripper wrapper for recording (includes RecorderOption)
   recorder_test.go
-  sanitizer.go         # Redaction and deterministic faking
+  sanitizer.go         # Redaction and deterministic faking (includes SanitizeFunc, Pipeline)
   sanitizer_test.go
-  server.go            # Mock HTTP server (http.Handler)
+  server.go            # Mock HTTP server (http.Handler, includes ServerOption)
   server_test.go
-  matcher.go           # Request-to-fixture matching
+  matcher.go           # Matcher interface, MatchCriterion, CompositeMatcher, ExactMatcher
   matcher_test.go
   store.go             # Storage port (interface)
-  store_file.go        # Filesystem storage adapter
+  store_file.go        # Filesystem storage adapter (includes FileStoreOption)
   store_file_test.go
   store_memory.go      # In-memory storage adapter (for tests)
   store_memory_test.go
   bundle.go            # Import/export (tar.gz)
   bundle_test.go
-  options.go           # Functional options for all public constructors
+  integration_test.go  # End-to-end integration tests
+  race_test.go         # Dedicated concurrency/race-condition tests
   doc.go               # Package-level documentation
 ```
+
+Note: functional options are co-located with their respective types (e.g.,
+`RecorderOption` in `recorder.go`, `ServerOption` in `server.go`) rather than
+in a monolithic `options.go` file. The `Matcher` interface lives in `matcher.go`
+alongside its implementations.
 
 ### Layer rules
 
@@ -99,7 +106,10 @@ Instead, the hexagonal boundaries are enforced by convention:
 
 - Go standard formatting (`gofmt`, `goimports`)
 - Error wrapping: `fmt.Errorf("context: %w", err)` — never swallow errors
-- No `panic` anywhere — this is a library, never panic on behalf of the caller
+- No `panic` in hot paths — this is a library, never panic on behalf of the caller.
+  Exception: constructor guards (e.g., `NewRecorder`, `NewServer`) may panic on nil
+  required dependencies. These are programming errors, not runtime failures, following
+  the `regexp.MustCompile` precedent in the Go standard library.
 - Table-driven tests preferred
 - Every exported type and function must have a godoc comment
 - Functional options pattern for all public constructors
