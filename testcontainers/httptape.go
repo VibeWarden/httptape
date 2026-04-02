@@ -3,6 +3,8 @@ package httptape
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/docker/go-connections/nat"
 	"github.com/testcontainers/testcontainers-go"
@@ -67,7 +69,10 @@ func RunContainer(ctx context.Context, opts ...Option) (*Container, error) {
 	}
 
 	cmd := buildCmd(o)
-	mounts := buildMounts(o)
+	mounts, err := buildMounts(o)
+	if err != nil {
+		return nil, fmt.Errorf("httptape: failed to prepare mounts: %w", err)
+	}
 
 	req := testcontainers.ContainerRequest{
 		Image:        o.image,
@@ -124,7 +129,9 @@ func buildCmd(o options) []string {
 }
 
 // buildMounts creates the bind mounts for fixtures and config.
-func buildMounts(o options) testcontainers.ContainerMounts {
+// When configJSON is set, it writes the JSON to a host temp file and
+// bind-mounts it into the container at /config/config.json.
+func buildMounts(o options) (testcontainers.ContainerMounts, error) {
 	var mounts testcontainers.ContainerMounts
 
 	if o.fixturesDir != "" {
@@ -142,13 +149,21 @@ func buildMounts(o options) testcontainers.ContainerMounts {
 	}
 
 	if len(o.configJSON) > 0 {
+		tmpDir, err := os.MkdirTemp("", "httptape-config-*")
+		if err != nil {
+			return nil, fmt.Errorf("create temp dir for config: %w", err)
+		}
+		tmpFile := filepath.Join(tmpDir, "config.json")
+		if err := os.WriteFile(tmpFile, o.configJSON, 0o644); err != nil {
+			return nil, fmt.Errorf("write config to temp file: %w", err)
+		}
 		mounts = append(mounts, testcontainers.ContainerMount{
-			Source: testcontainers.GenericTmpfsMountSource{},
-			Target: "/config",
+			Source: testcontainers.GenericBindMountSource{HostPath: tmpFile},
+			Target: "/config/config.json",
 		})
 	}
 
-	return mounts
+	return mounts, nil
 }
 
 // extractPort returns the numeric port from a port spec like "8081/tcp".

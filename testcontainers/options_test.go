@@ -1,8 +1,11 @@
 package httptape
 
 import (
+	"os"
 	"strings"
 	"testing"
+
+	"github.com/testcontainers/testcontainers-go"
 )
 
 func TestValidate_MutuallyExclusiveConfig(t *testing.T) {
@@ -196,4 +199,137 @@ func assertContains(t *testing.T, slice []string, key, value string) {
 		}
 	}
 	t.Errorf("slice %v does not contain consecutive pair (%q, %q)", slice, key, value)
+}
+
+func TestValidate_ConfigMarshalError(t *testing.T) {
+	o := options{
+		image:     DefaultImage,
+		port:      DefaultPort,
+		mode:      ModeServe,
+		fixturesDir: "/tmp/fixtures",
+	}
+	// Simulate a marshal error via WithConfig with an unmarshallable value.
+	WithConfig(make(chan int))(&o)
+
+	err := o.validate()
+	if err == nil {
+		t.Fatal("expected error for config marshal failure")
+	}
+	if !strings.Contains(err.Error(), "WithConfig") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+	if !strings.Contains(err.Error(), "marshal") {
+		t.Errorf("expected error to mention marshal: %v", err)
+	}
+}
+
+func TestBuildMounts_NoMounts(t *testing.T) {
+	o := options{mode: ModeServe, port: DefaultPort}
+	mounts, err := buildMounts(o)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(mounts) != 0 {
+		t.Errorf("expected 0 mounts, got %d", len(mounts))
+	}
+}
+
+func TestBuildMounts_FixturesDir(t *testing.T) {
+	o := options{
+		mode:        ModeServe,
+		port:        DefaultPort,
+		fixturesDir: "/host/fixtures",
+	}
+	mounts, err := buildMounts(o)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(mounts) != 1 {
+		t.Fatalf("expected 1 mount, got %d", len(mounts))
+	}
+	assertMount(t, mounts[0], "/host/fixtures", "/fixtures")
+}
+
+func TestBuildMounts_ConfigFile(t *testing.T) {
+	o := options{
+		mode:       ModeServe,
+		port:       DefaultPort,
+		configFile: "/host/config.json",
+	}
+	mounts, err := buildMounts(o)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(mounts) != 1 {
+		t.Fatalf("expected 1 mount, got %d", len(mounts))
+	}
+	assertMount(t, mounts[0], "/host/config.json", "/config/config.json")
+}
+
+func TestBuildMounts_ConfigJSON(t *testing.T) {
+	o := options{
+		mode:       ModeServe,
+		port:       DefaultPort,
+		configJSON: []byte(`{"version":"1"}`),
+	}
+	mounts, err := buildMounts(o)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(mounts) != 1 {
+		t.Fatalf("expected 1 mount, got %d", len(mounts))
+	}
+	// The mount target should be the config file path inside the container.
+	if string(mounts[0].Target) != "/config/config.json" {
+		t.Errorf("expected target /config/config.json, got %q", mounts[0].Target)
+	}
+	// The source should be a bind mount to a temp file that contains our JSON.
+	src, ok := mounts[0].Source.(testcontainers.GenericBindMountSource)
+	if !ok {
+		t.Fatalf("expected GenericBindMountSource, got %T", mounts[0].Source)
+	}
+	data, err := os.ReadFile(src.HostPath)
+	if err != nil {
+		t.Fatalf("failed to read temp config file: %v", err)
+	}
+	if string(data) != `{"version":"1"}` {
+		t.Errorf("unexpected config content: %s", data)
+	}
+	// Clean up the temp file.
+	os.RemoveAll(strings.TrimSuffix(src.HostPath, "/config.json"))
+}
+
+func TestBuildMounts_AllOptions(t *testing.T) {
+	o := options{
+		mode:        ModeServe,
+		port:        DefaultPort,
+		fixturesDir: "/host/fixtures",
+		configFile:  "/host/config.json",
+	}
+	mounts, err := buildMounts(o)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(mounts) != 2 {
+		t.Fatalf("expected 2 mounts, got %d", len(mounts))
+	}
+	assertMount(t, mounts[0], "/host/fixtures", "/fixtures")
+	assertMount(t, mounts[1], "/host/config.json", "/config/config.json")
+}
+
+// assertMount checks that a ContainerMount has the expected source host path
+// and target container path.
+func assertMount(t *testing.T, m testcontainers.ContainerMount, wantHostPath, wantTarget string) {
+	t.Helper()
+	if string(m.Target) != wantTarget {
+		t.Errorf("mount target = %q, want %q", m.Target, wantTarget)
+	}
+	src, ok := m.Source.(testcontainers.GenericBindMountSource)
+	if !ok {
+		t.Errorf("expected GenericBindMountSource, got %T", m.Source)
+		return
+	}
+	if src.HostPath != wantHostPath {
+		t.Errorf("mount source = %q, want %q", src.HostPath, wantHostPath)
+	}
 }

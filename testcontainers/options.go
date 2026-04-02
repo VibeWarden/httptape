@@ -12,18 +12,23 @@ type Option func(*options)
 
 // options holds the resolved configuration for RunContainer.
 type options struct {
-	image      string
-	port       string
-	mode       string
+	image       string
+	port        string
+	mode        string
 	fixturesDir string
-	configFile string
-	configJSON []byte
-	target     string
+	configFile  string
+	configJSON  []byte
+	configErr   error
+	target      string
 }
 
 // validate checks option consistency and returns an error if the
 // configuration is invalid.
 func (o *options) validate() error {
+	if o.configErr != nil {
+		return fmt.Errorf("WithConfig: failed to marshal config: %w", o.configErr)
+	}
+
 	if o.configFile != "" && len(o.configJSON) > 0 {
 		return errors.New("WithConfig and WithConfigFile are mutually exclusive")
 	}
@@ -61,10 +66,8 @@ func WithConfig(cfg any) Option {
 	return func(o *options) {
 		data, err := json.Marshal(cfg)
 		if err != nil {
-			// Store the error as a sentinel; validate() will catch it is not
-			// strictly needed since json.Marshal on a Config is infallible,
-			// but we handle it defensively.
 			o.configJSON = nil
+			o.configErr = err
 			return
 		}
 		o.configJSON = data
