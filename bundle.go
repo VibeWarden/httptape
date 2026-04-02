@@ -123,14 +123,20 @@ func ExportBundle(ctx context.Context, s Store, opts ...ExportOption) (io.Reader
 }
 
 // writeBundle writes the full tar.gz archive to w. Returns nil on success.
-func writeBundle(ctx context.Context, w io.Writer, tapes []Tape, cfg exportConfig) error {
+// Writers are closed explicitly on the success path with error checking.
+// On error paths, the deferred close ensures resources are released (the
+// caller closes the pipe writer which propagates the error to readers).
+func writeBundle(ctx context.Context, w io.Writer, tapes []Tape, cfg exportConfig) (retErr error) {
 	gw := gzip.NewWriter(w)
 	tw := tar.NewWriter(gw)
 
+	// Deferred close only runs on error paths. On the success path,
+	// the explicit close below handles finalization with error checking.
 	defer func() {
-		// Close in order: tar, gzip. Pipe is closed by caller.
-		tw.Close()
-		gw.Close()
+		if retErr != nil {
+			tw.Close()
+			gw.Close()
+		}
 	}()
 
 	manifest := buildManifest(tapes, cfg)
@@ -187,7 +193,7 @@ func writeBundle(ctx context.Context, w io.Writer, tapes []Tape, cfg exportConfi
 		}
 	}
 
-	// Explicit close in correct order before deferred close (deferred close is idempotent).
+	// Explicit close in correct order with error checking (success path).
 	if err := tw.Close(); err != nil {
 		return fmt.Errorf("httptape: export: close tar: %w", err)
 	}

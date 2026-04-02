@@ -80,11 +80,11 @@ func TestRedactHeaders_DefaultHeaders(t *testing.T) {
 	}
 	tape := makeTapeWithHeaders(reqHeaders, respHeaders)
 
-	fn := RedactHeaders() // no args => DefaultSensitiveHeaders
+	fn := RedactHeaders() // no args => DefaultSensitiveHeaders()
 	result := fn(tape)
 
 	// All default sensitive headers in request should be redacted.
-	for _, name := range DefaultSensitiveHeaders {
+	for _, name := range DefaultSensitiveHeaders() {
 		if val := result.Request.Headers.Get(name); val != "" && val != Redacted {
 			t.Errorf("request header %q: expected %q, got %q", name, Redacted, val)
 		}
@@ -1564,5 +1564,51 @@ func BenchmarkSanitizer_FullPipeline(b *testing.B) {
 				pipeline.Sanitize(tape)
 			}
 		})
+	}
+}
+
+func TestDefaultSensitiveHeaders_ReturnsACopy(t *testing.T) {
+	h1 := DefaultSensitiveHeaders()
+	h2 := DefaultSensitiveHeaders()
+
+	// Verify they contain the same values.
+	if len(h1) != len(h2) {
+		t.Fatalf("lengths differ: %d vs %d", len(h1), len(h2))
+	}
+	for i := range h1 {
+		if h1[i] != h2[i] {
+			t.Errorf("index %d: %q != %q", i, h1[i], h2[i])
+		}
+	}
+
+	// Mutating one copy must not affect the other.
+	h1[0] = "MUTATED"
+	h3 := DefaultSensitiveHeaders()
+	if h3[0] == "MUTATED" {
+		t.Error("DefaultSensitiveHeaders returned a shared slice; mutation leaked")
+	}
+}
+
+func TestDefaultSensitiveHeaders_ContainsExpectedHeaders(t *testing.T) {
+	headers := DefaultSensitiveHeaders()
+	expected := map[string]bool{
+		"Authorization":       false,
+		"Cookie":              false,
+		"Set-Cookie":          false,
+		"X-Api-Key":           false,
+		"Proxy-Authorization": false,
+		"X-Forwarded-For":     false,
+	}
+
+	for _, h := range headers {
+		if _, ok := expected[h]; ok {
+			expected[h] = true
+		}
+	}
+
+	for name, found := range expected {
+		if !found {
+			t.Errorf("expected header %q not found in DefaultSensitiveHeaders()", name)
+		}
 	}
 }

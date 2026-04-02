@@ -15,9 +15,22 @@ import (
 // Redacted is the replacement value used for redacted header values.
 const Redacted = "[REDACTED]"
 
-// DefaultSensitiveHeaders is the predefined set of HTTP header names that
-// commonly contain sensitive data. These headers are redacted by default
-// when using RedactHeaders without explicit header names.
+// defaultSensitiveHeaders is the internal list of HTTP header names that
+// commonly contain sensitive data. Access it via DefaultSensitiveHeaders().
+var defaultSensitiveHeaders = []string{
+	"Authorization",
+	"Cookie",
+	"Set-Cookie",
+	"X-Api-Key",
+	"Proxy-Authorization",
+	"X-Forwarded-For",
+}
+
+// DefaultSensitiveHeaders returns a copy of the predefined set of HTTP header
+// names that commonly contain sensitive data. These headers are redacted by
+// default when using RedactHeaders without explicit header names.
+//
+// A new copy is returned on each call to prevent mutation of the internal list.
 //
 // The set includes:
 //   - Authorization -- bearer tokens, basic auth credentials
@@ -26,13 +39,10 @@ const Redacted = "[REDACTED]"
 //   - X-Api-Key -- API key authentication
 //   - Proxy-Authorization -- proxy authentication credentials
 //   - X-Forwarded-For -- client IP addresses (PII)
-var DefaultSensitiveHeaders = []string{
-	"Authorization",
-	"Cookie",
-	"Set-Cookie",
-	"X-Api-Key",
-	"Proxy-Authorization",
-	"X-Forwarded-For",
+func DefaultSensitiveHeaders() []string {
+	cp := make([]string, len(defaultSensitiveHeaders))
+	copy(cp, defaultSensitiveHeaders)
+	return cp
 }
 
 // SanitizeFunc is a function that transforms a Tape as part of a sanitization
@@ -98,7 +108,7 @@ func (p *Pipeline) Sanitize(t Tape) Tape {
 //	))
 func RedactHeaders(names ...string) SanitizeFunc {
 	if len(names) == 0 {
-		names = DefaultSensitiveHeaders
+		names = DefaultSensitiveHeaders()
 	}
 
 	// Build a set of canonical header names for O(1) lookup.
@@ -229,6 +239,9 @@ func RedactBodyPaths(paths ...string) SanitizeFunc {
 		} else {
 			t.Request.Body = newReqBody
 		}
+		// Note: BodyHash is updated for the request but not for the response
+		// because RecordedResp does not have a BodyHash field. If a BodyHash
+		// field is ever added to RecordedResp, it must be updated here too.
 		t.Response.Body = redactBodyFields(t.Response.Body, parsed)
 		return t
 	}
@@ -378,6 +391,9 @@ func FakeFields(seed string, paths ...string) SanitizeFunc {
 		} else {
 			t.Request.Body = newReqBody
 		}
+		// Note: BodyHash is updated for the request but not for the response
+		// because RecordedResp does not have a BodyHash field. If a BodyHash
+		// field is ever added to RecordedResp, it must be updated here too.
 		t.Response.Body = fakeBodyFields(t.Response.Body, parsed, seed)
 		return t
 	}

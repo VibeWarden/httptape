@@ -362,6 +362,16 @@ func (r *Recorder) Close() error {
 
 // drain is the background goroutine that reads tapes from the channel and
 // persists them to the store.
+//
+// Note: drain uses context.Background() for store.Save calls because there is
+// no parent context available in the background goroutine. This means pending
+// saves cannot be cancelled during shutdown — Close() will block until all
+// buffered tapes are saved. If the store is slow (e.g., network-backed), this
+// could cause Close() to hang. A future improvement would be to accept a
+// context in Close() or use a context with a timeout.
+//
+// TODO: consider accepting a context in Close() to allow cancellation of
+// pending saves during shutdown.
 func (r *Recorder) drain() {
 	defer close(r.done)
 	for tape := range r.tapeCh {

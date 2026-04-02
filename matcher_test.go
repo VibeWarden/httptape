@@ -1496,6 +1496,119 @@ func TestExtractAtPath_EmptySegments(t *testing.T) {
 	}
 }
 
+// --- ExactMatcher tests ---
+
+func TestExactMatcher_FullURLMatch(t *testing.T) {
+	matcher := ExactMatcher()
+
+	tests := []struct {
+		name      string
+		reqMethod string
+		reqPath   string
+		tapeMethod string
+		tapeURL    string
+		wantMatch  bool
+	}{
+		{
+			name:       "full URL tape matches request path",
+			reqMethod:  "GET",
+			reqPath:    "/users",
+			tapeMethod: "GET",
+			tapeURL:    "https://api.example.com/users",
+			wantMatch:  true,
+		},
+		{
+			name:       "path-only tape URL",
+			reqMethod:  "GET",
+			reqPath:    "/users",
+			tapeMethod: "GET",
+			tapeURL:    "/users",
+			wantMatch:  true,
+		},
+		{
+			name:       "method mismatch",
+			reqMethod:  "POST",
+			reqPath:    "/users",
+			tapeMethod: "GET",
+			tapeURL:    "https://api.example.com/users",
+			wantMatch:  false,
+		},
+		{
+			name:       "path mismatch",
+			reqMethod:  "GET",
+			reqPath:    "/accounts",
+			tapeMethod: "GET",
+			tapeURL:    "https://api.example.com/users",
+			wantMatch:  false,
+		},
+		{
+			name:       "full URL with query params matches path",
+			reqMethod:  "GET",
+			reqPath:    "/users",
+			tapeMethod: "GET",
+			tapeURL:    "https://api.example.com/users?page=1",
+			wantMatch:  true,
+		},
+		{
+			name:       "unparsable URL returns no match",
+			reqMethod:  "GET",
+			reqPath:    "/users",
+			tapeMethod: "GET",
+			tapeURL:    "://bad-url",
+			wantMatch:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.reqMethod, tt.reqPath, nil)
+			candidates := []Tape{{
+				ID: "tape-1",
+				Request: RecordedReq{
+					Method: tt.tapeMethod,
+					URL:    tt.tapeURL,
+				},
+				Response: RecordedResp{StatusCode: 200},
+			}}
+
+			tape, ok := matcher.Match(req, candidates)
+			if ok != tt.wantMatch {
+				t.Errorf("Match() ok = %v, want %v", ok, tt.wantMatch)
+			}
+			if tt.wantMatch && tape.ID != "tape-1" {
+				t.Errorf("Match() tape.ID = %q, want %q", tape.ID, "tape-1")
+			}
+		})
+	}
+}
+
+func TestExactMatcher_EmptyCandidates(t *testing.T) {
+	matcher := ExactMatcher()
+	req := httptest.NewRequest("GET", "/users", nil)
+	_, ok := matcher.Match(req, nil)
+	if ok {
+		t.Error("expected no match for empty candidates")
+	}
+}
+
+func TestExactMatcher_FirstMatchWins(t *testing.T) {
+	matcher := ExactMatcher()
+	req := httptest.NewRequest("GET", "/users", nil)
+
+	candidates := []Tape{
+		{ID: "first", Request: RecordedReq{Method: "GET", URL: "https://a.com/users"}},
+		{ID: "second", Request: RecordedReq{Method: "GET", URL: "https://b.com/users"}},
+	}
+
+	tape, ok := matcher.Match(req, candidates)
+	if !ok {
+		t.Fatal("expected a match")
+	}
+	if tape.ID != "first" {
+		t.Errorf("expected first match, got %q", tape.ID)
+	}
+}
+
 // --- Server integration: verify DefaultMatcher is used by default ---
 
 func TestServer_UsesDefaultMatcher(t *testing.T) {

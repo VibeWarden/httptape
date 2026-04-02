@@ -78,6 +78,14 @@ func NewServer(store Store, opts ...ServerOption) *Server {
 // and writing the recorded response. If no tape matches, it writes the
 // configured fallback response.
 //
+// Performance note: ServeHTTP calls Store.List with an empty filter on every
+// request, resulting in an O(n) scan over all tapes. This is acceptable for
+// v1 test usage with small fixture sets. For large fixture sets (500+ tapes),
+// consider adding a WithFilter option to scope the list call, or caching
+// tapes with a configurable TTL.
+//
+// TODO: add optional tape caching or scoped filtering for large fixture sets.
+//
 // The method is safe for concurrent use.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Step 2: retrieve all tapes from store.
