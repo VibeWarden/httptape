@@ -5476,3 +5476,157 @@ File: `.github/workflows/docker.yml`
   can use ephemeral debug containers or a future `distroless/debug` variant.
 - **Unblocks #78**: The testcontainers module can reference
   `ghcr.io/vibewarden/httptape` as its container image.
+
+### ADR-21: Testcontainers Module
+
+**Date**: 2026-03-30
+**Issue**: #78
+**Status**: Accepted
+**Depends on**: ADR-20 (Docker Image)
+
+#### Context
+
+The Docker image (ADR-20) enables running httptape as a sidecar, but Go
+developers still need manual `docker run` orchestration in integration tests.
+The testcontainers-go ecosystem provides a standard pattern: call a
+`RunContainer` function, get back a handle with connection details, tear it
+down in `defer`. A first-party testcontainers module eliminates boilerplate
+and gives users process isolation without leaving the `go test` workflow.
+
+Design constraints:
+
+1. **Separate Go module** — testcontainers-go is an external dependency. The
+   main httptape module has a zero-dependency guarantee (CLAUDE.md). A
+   separate `go.mod` keeps the dependency graph isolated.
+2. **Thin wrapper** — the module configures and starts the container. It does
+   not duplicate httptape library logic; the container runs the CLI binary
+   from the Docker image.
+3. **Functional options** — consistent with the main library's API style
+   (functional options for all public constructors).
+4. **Docker-only prerequisite** — tests importing this module require a
+   running Docker daemon. A build tag allows skipping when Docker is
+   unavailable.
+
+#### Decision
+
+##### Module layout
+
+```
+testcontainers/
+  go.mod              # module github.com/VibeWarden/httptape/testcontainers
+  go.sum
+  httptape.go         # RunContainer, Container, Option types
+  httptape_test.go    # Integration tests (build tag: dockertest)
+  options.go          # Functional option implementations
+  doc.go              # Package-level documentation
+  README.md           # Usage examples and API overview
+  testdata/           # Fixtures and config for integration tests
+    fixtures/
+    config.json
+```
+
+The module has its own `go.mod` with `go 1.26` and a dependency on
+`github.com/testcontainers/testcontainers-go` (latest stable). It does NOT
+depend on `github.com/VibeWarden/httptape` — the module only talks to the
+container over HTTP.
+
+##### Public API
+
+```go
+package httptape
+
+// RunContainer starts an httptape Docker container and returns a handle.
+// The caller must call Container.Terminate to clean up resources.
+func RunContainer(ctx context.Context, opts ...Option) (*Container, error)
+
+// Container wraps a running httptape Docker container.
+type Container struct {
+    testcontainers.Container  // embed for advanced use
+}
+
+// BaseURL returns the mapped HTTP base URL (e.g. "http://localhost:32789").
+func (c *Container) BaseURL() string
+
+// Endpoint returns host:port for the mapped container port.
+func (c *Container) Endpoint(ctx context.Context) (string, error)
+
+// Terminate stops and removes the container.
+func (c *Container) Terminate(ctx context.Context) error
+```
+
+##### Functional options
+
+| Option | Purpose | Default |
+|---|---|---|
+| `WithFixturesDir(path)` | Bind-mount a host directory to `/fixtures` in the container. | none (required for serve mode) |
+| `WithConfig(cfg httptape.Config)` | Serialise a `Config` struct to JSON and mount it at `/config/config.json`. Requires importing the main module. | none |
+| `WithConfigFile(path)` | Bind-mount a host JSON config file to `/config/config.json`. | none |
+| `WithPort(port string)` | Set the container's exposed port (e.g. `"9090/tcp"`). | `"8081/tcp"` |
+| `WithImage(image string)` | Override the Docker image reference. | `"ghcr.io/vibewarden/httptape:latest"` |
+| `WithMode(mode string)` | CLI subcommand: `"serve"` or `"record"`. | `"serve"` |
+| `WithTarget(url string)` | Upstream URL for record mode (maps to `--upstream`). | none |
+
+`WithConfig` and `WithConfigFile` are mutually exclusive; supplying both
+returns an error from `RunContainer`.
+
+##### Container startup logic
+
+`RunContainer` builds a `testcontainers.ContainerRequest`:
+
+1. **Image**: `ghcr.io/vibewarden/httptape:latest` (overridable via
+   `WithImage`).
+2. **Cmd**: the CLI subcommand and flags, e.g.
+   `["serve", "--fixtures", "/fixtures", "--port", "8081"]`.
+   In record mode: `["record", "--fixtures", "/fixtures", "--upstream",
+   "<target>", "--config", "/config/config.json", "--port", "8081"]`.
+3. **ExposedPorts**: `["8081/tcp"]` (overridable via `WithPort`).
+4. **Mounts**: bind mounts for fixtures directory and config file.
+5. **WaitingFor**: `wait.ForHTTP("/").WithPort("8081/tcp")` — the serve
+   command returns responses as soon as the listener is ready. For a more
+   robust check, use `wait.ForListeningPort("8081/tcp")` since the scratch
+   image has no health endpoint yet.
+
+The function validates option consistency (e.g., record mode requires
+`WithTarget`), starts the container, waits for readiness, and returns the
+`Container` handle.
+
+##### Build tag for tests
+
+Integration tests in `httptape_test.go` use:
+
+```go
+//go:build dockertest
+```
+
+CI runs them with `go test -tags dockertest ./testcontainers/...`. Local
+developers without Docker simply omit the tag. This avoids surprising
+failures in `go test ./...` from the repo root.
+
+##### Why not a subdirectory inside the main module?
+
+Putting testcontainers code in `testcontainers/` as a sub-package of the
+main module would force `testcontainers-go` into the main `go.mod`,
+violating the zero-dependency constraint. A separate Go module (with its
+own `go.mod`) is the standard Go solution: the main module's dependency
+tree is unaffected, and users `go get` only what they need.
+
+#### Consequences
+
+- **No impact on main module**: the testcontainers module has its own
+  dependency tree. `go get github.com/VibeWarden/httptape` still pulls
+  zero transitive dependencies.
+- **Process isolation**: bugs in test fixtures or config cannot crash the
+  test process. The container is a separate OS process with its own memory
+  space.
+- **Language-agnostic potential**: although this module is Go-specific,
+  the Docker image it wraps can be used from any language's testcontainers
+  library (Java, Python, etc.) without changes.
+- **Docker requirement**: tests using this module need a Docker daemon.
+  The build tag mitigates CI environments without Docker.
+- **Image availability**: the module assumes the Docker image from #77 is
+  published to `ghcr.io/vibewarden/httptape`. If the image is not yet
+  available, integration tests will fail until #77 is merged and the CI
+  workflow publishes the first image.
+- **Maintenance surface**: a new `go.mod` means a separate dependency
+  update cadence. Dependabot or Renovate should be configured to cover
+  `testcontainers/go.mod`.
