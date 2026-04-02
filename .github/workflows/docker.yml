@@ -1,6 +1,6 @@
 # .github/workflows/docker.yml
 #
-# Build and push the httptape Docker image to GHCR.
+# Build and push the httptape Docker image to GHCR and Docker Hub.
 # Triggers: push to main, semver tags (v*).
 
 name: Docker
@@ -17,8 +17,8 @@ permissions:
   packages: write
 
 env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: vibewarden/httptape
+  IMAGE_NAME_GHCR: ghcr.io/vibewarden/httptape
+  IMAGE_NAME_DOCKERHUB: tibtof/httptape
 
 jobs:
   build-and-push:
@@ -28,17 +28,27 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Log in to Docker Hub
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Extract metadata (tags, labels)
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ env.IMAGE_NAME }}
+          images: |
+            ${{ env.IMAGE_NAME_GHCR }}
+            ${{ env.IMAGE_NAME_DOCKERHUB }}
           tags: |
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
             type=semver,pattern={{version}}
