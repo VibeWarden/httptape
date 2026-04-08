@@ -1087,3 +1087,73 @@ func TestTape_MetadataRoundTrip(t *testing.T) {
 		t.Errorf("delay = %v, want 500ms", tape.Metadata["delay"])
 	}
 }
+
+func TestServer_ReplayHeaders_Override(t *testing.T) {
+	store := NewMemoryStore()
+	storeTape(t, store, "GET", "/api/data", 200, `{"ok":true}`, http.Header{
+		"Authorization": {"Bearer original-token"},
+		"Content-Type":  {"application/json"},
+	})
+
+	srv := NewServer(store,
+		WithReplayHeaders("Authorization", "Bearer injected-token"),
+	)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/api/data", nil)
+
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := rec.Header().Get("Authorization"); got != "Bearer injected-token" {
+		t.Errorf("Authorization = %q, want %q", got, "Bearer injected-token")
+	}
+	// Original header that was NOT overridden should still be present.
+	if got := rec.Header().Get("Content-Type"); got != "application/json" {
+		t.Errorf("Content-Type = %q, want %q", got, "application/json")
+	}
+}
+
+func TestServer_ReplayHeaders_Multiple(t *testing.T) {
+	store := NewMemoryStore()
+	storeTape(t, store, "GET", "/multi", 200, "ok", http.Header{})
+
+	srv := NewServer(store,
+		WithReplayHeaders("X-Request-Id", "req-123"),
+		WithReplayHeaders("X-Trace-Id", "trace-456"),
+		WithReplayHeaders("Cache-Control", "no-store"),
+	)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/multi", nil)
+
+	srv.ServeHTTP(rec, req)
+
+	tests := map[string]string{
+		"X-Request-Id":  "req-123",
+		"X-Trace-Id":    "trace-456",
+		"Cache-Control":  "no-store",
+	}
+	for key, want := range tests {
+		if got := rec.Header().Get(key); got != want {
+			t.Errorf("%s = %q, want %q", key, got, want)
+		}
+	}
+}
+
+func TestServer_ReplayHeaders_NotSetByDefault(t *testing.T) {
+	store := NewMemoryStore()
+	storeTape(t, store, "GET", "/default", 200, "ok", http.Header{
+		"X-Original": {"value"},
+	})
+
+	srv := NewServer(store) // no WithReplayHeaders
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/default", nil)
+
+	srv.ServeHTTP(rec, req)
+
+	if got := rec.Header().Get("X-Original"); got != "value" {
+		t.Errorf("X-Original = %q, want %q", got, "value")
+	}
+}

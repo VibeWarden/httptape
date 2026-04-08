@@ -45,6 +45,15 @@ const (
 
 var logger = log.New(os.Stderr, "httptape: ", 0)
 
+// repeatableFlag is a flag.Value that accumulates repeated flag uses into a slice.
+type repeatableFlag []string
+
+func (r *repeatableFlag) String() string { return strings.Join(*r, ", ") }
+func (r *repeatableFlag) Set(value string) error {
+	*r = append(*r, value)
+	return nil
+}
+
 const usageText = `httptape — HTTP traffic recording, sanitization, and replay
 
 Usage:
@@ -117,6 +126,8 @@ func runServe(args []string) error {
 	cors := fs.Bool("cors", false, "Enable CORS headers (Access-Control-Allow-Origin: *)")
 	delay := fs.Duration("delay", 0, "Fixed delay before every response (e.g., 200ms, 1s)")
 	errorRate := fs.Float64("error-rate", 0, "Fraction of requests that return 500 (0.0-1.0)")
+	var replayHeaders repeatableFlag
+	fs.Var(&replayHeaders, "replay-header", "Header to inject into responses (Key=Value, repeatable)")
 
 	if err := fs.Parse(args); err != nil {
 		return &usageError{err}
@@ -142,6 +153,13 @@ func runServe(args []string) error {
 	}
 	if *errorRate > 0 {
 		serverOpts = append(serverOpts, httptape.WithErrorRate(*errorRate))
+	}
+	for _, rh := range replayHeaders {
+		eqIdx := strings.Index(rh, "=")
+		if eqIdx < 1 {
+			return &usageError{fmt.Errorf("invalid --replay-header %q: expected Key=Value", rh)}
+		}
+		serverOpts = append(serverOpts, httptape.WithReplayHeaders(rh[:eqIdx], rh[eqIdx+1:]))
 	}
 
 	server := httptape.NewServer(store, serverOpts...)

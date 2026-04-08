@@ -23,6 +23,7 @@ type Server struct {
 	delay          time.Duration    // fixed delay before every response; zero means no delay
 	errorRate      float64          // fraction of requests that return 500 (0.0-1.0)
 	randFloat      func() float64   // random number generator (injectable for testing)
+	replayHeaders  map[string]string // headers injected into every replayed response
 }
 
 // ServerOption configures a Server.
@@ -92,6 +93,22 @@ func WithErrorRate(rate float64) ServerOption {
 	}
 }
 
+// WithReplayHeaders adds a header that will be injected into every replayed
+// response. It is applied after tape matching and overrides any header with the
+// same key that was present in the recorded tape. WithReplayHeaders may be
+// called multiple times to set multiple headers.
+//
+// Common use cases include injecting authorization tokens, correlation IDs,
+// or cache-control headers that differ between environments.
+func WithReplayHeaders(key, value string) ServerOption {
+	return func(s *Server) {
+		if s.replayHeaders == nil {
+			s.replayHeaders = make(map[string]string)
+		}
+		s.replayHeaders[key] = value
+	}
+}
+
 // withRandFloat overrides the random number generator for testing.
 // This is unexported -- only used in tests to make error simulation
 // deterministic.
@@ -145,7 +162,8 @@ func NewServer(store Store, opts ...ServerOption) *Server {
 //  3. Normal replay -- existing match-and-respond logic
 //  4. Per-fixture error override -- after matching, before writing
 //  5. Delay -- sleep before writing the real response
-//  6. Write response
+//  6. Replay header injection -- override/add headers from WithReplayHeaders
+//  7. Write response
 //
 // Performance note: ServeHTTP calls Store.List with an empty filter on every
 // request, resulting in an O(n) scan over all tapes. This is acceptable for
@@ -243,11 +261,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	for key, values := range tape.Response.Headers {
 		w.Header()[key] = append([]string(nil), values...)
 	}
-	// 8b: remove Content-Length — the recorded value may be stale if the body
+	// 8b: apply replay header overrides (if any).
+	for key, value := range s.replayHeaders {
+		w.Header().Set(key, value)
+	}
+	// 8c: remove Content-Length — the recorded value may be stale if the body
 	// was modified by sanitization. Let net/http set it from the actual body.
 	w.Header().Del("Content-Length")
-	// 8c: write status code.
+	// 8d: write status code.
 	w.WriteHeader(tape.Response.StatusCode)
-	// 8d: write body.
+	// 8e: write body.
 	w.Write(tape.Response.Body) //nolint:errcheck // response write failure is not actionable
 }
