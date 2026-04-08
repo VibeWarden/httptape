@@ -162,11 +162,23 @@ func (p *Proxy) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	// 3. Decide: success or fallback?
 	if p.isFallback(transportErr, resp) {
+		// Drain and close the upstream body if we received a response (e.g. 5xx)
+		// but are choosing to fall back instead of returning it. We keep the
+		// bytes so the original response can be returned if no cache match exists.
+		if resp != nil && resp.Body != nil {
+			respBodyBytes, readErr := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if readErr == nil {
+				resp.Body = io.NopCloser(bytes.NewReader(respBodyBytes))
+			} else {
+				resp.Body = io.NopCloser(bytes.NewReader(nil))
+			}
+		}
 		// Restore body for matcher consumption.
 		if reqBody != nil {
 			req.Body = io.NopCloser(bytes.NewReader(reqBody))
 		}
-		return p.fallback(req, transportErr)
+		return p.fallback(req, resp, transportErr)
 	}
 
 	// 4. Success path: capture response body.
@@ -221,7 +233,10 @@ func (p *Proxy) RoundTrip(req *http.Request) (*http.Response, error) {
 
 // fallback attempts to find a matching cached tape, first from L1 (raw),
 // then from L2 (sanitized). Returns the original error if no match is found.
-func (p *Proxy) fallback(req *http.Request, originalErr error) (*http.Response, error) {
+// When triggered by a 5xx response (originalErr is nil) and no cache match
+// exists, the original 5xx response is returned to satisfy the RoundTripper
+// contract (which forbids returning nil, nil).
+func (p *Proxy) fallback(req *http.Request, originalResp *http.Response, originalErr error) (*http.Response, error) {
 	ctx := req.Context()
 
 	// Try L1 first (raw, best UX).
@@ -242,7 +257,13 @@ func (p *Proxy) fallback(req *http.Request, originalErr error) (*http.Response, 
 		return p.tapeToResponse(tape, "l2-cache"), nil
 	}
 
-	// No match in either cache -- return original error.
+	// No match in either cache.
+	// If triggered by a 5xx (not a transport error), return the original
+	// response so we don't violate the RoundTripper contract (nil, nil).
+	if originalErr == nil && originalResp != nil {
+		return originalResp, nil
+	}
+
 	return nil, originalErr
 }
 

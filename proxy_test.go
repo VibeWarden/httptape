@@ -491,6 +491,53 @@ func TestProxy_OnErrorCallback(t *testing.T) {
 	mu.Unlock()
 }
 
+func TestProxy_FallbackOn5xx_NoCacheMatch(t *testing.T) {
+	l1 := NewMemoryStore() // empty
+	l2 := NewMemoryStore() // empty
+
+	// Transport returns 503 with a body.
+	transport := roundTripperFunc(func(_ *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: 503,
+			Header:     http.Header{"X-Upstream": {"true"}},
+			Body:       io.NopCloser(strings.NewReader("Service Unavailable")),
+		}, nil
+	})
+
+	proxy := NewProxy(l1, l2,
+		WithProxyTransport(transport),
+		WithProxyFallbackOn(func(err error, resp *http.Response) bool {
+			if err != nil {
+				return true
+			}
+			return resp != nil && resp.StatusCode >= 500
+		}),
+	)
+
+	req, _ := http.NewRequest("GET", "http://example.com/api/users", nil)
+	resp, err := proxy.RoundTrip(req)
+
+	// Must not return (nil, nil) -- that violates the RoundTripper contract.
+	if resp == nil && err == nil {
+		t.Fatal("RoundTrip returned (nil, nil), violating RoundTripper contract")
+	}
+
+	// With no cache match, the original 5xx response should be returned.
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 503 {
+		t.Errorf("got status %d, want 503 (original 5xx)", resp.StatusCode)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "Service Unavailable" {
+		t.Errorf("got body %q, want %q", string(body), "Service Unavailable")
+	}
+}
+
 func TestProxy_WithProxyRoute(t *testing.T) {
 	l1 := NewMemoryStore()
 	l2 := NewMemoryStore()
