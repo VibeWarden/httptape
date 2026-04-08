@@ -6449,3 +6449,106 @@ import (
 - **Per-fixture features require manual JSON editing**: there is no DSL
   or CLI for setting per-fixture metadata. This is acceptable for v1 --
   users edit fixture JSON directly.
+
+---
+
+### ADR-25: Replay header injection (WithReplayHeaders)
+
+**Date**: 2026-03-30
+**Issue**: #105
+**Status**: Accepted
+
+#### Context
+
+When replaying recorded fixtures as a mock server, certain HTTP response
+headers may need to differ from what was originally recorded. Common
+scenarios include:
+
+- Injecting fresh `Authorization` tokens so downstream clients pass
+  validation.
+- Adding correlation or trace headers (`X-Request-Id`, `X-Trace-Id`)
+  for observability in test environments.
+- Overriding `Cache-Control` or `Set-Cookie` headers that are
+  environment-specific.
+
+Currently, the only way to achieve this is to edit every fixture file
+manually, which is error-prone and pollutes diffs.
+
+#### Decision
+
+Add a new `ServerOption`:
+
+```go
+func WithReplayHeaders(key, value string) ServerOption
+```
+
+**Library side** (`server.go`):
+
+- A `replayHeaders map[string]string` field is added to the `Server`
+  struct.
+- Each call to `WithReplayHeaders` inserts (or overwrites) an entry in
+  the map.
+- In `ServeHTTP`, after copying the matched tape's response headers and
+  before removing `Content-Length`, every entry in `replayHeaders` is
+  applied via `w.Header().Set(key, value)`. This means replay headers
+  override tape headers with the same key.
+
+**CLI side** (`cmd/httptape/main.go`):
+
+- A repeatable `--replay-header` flag is added to the `serve` command.
+- Format: `--replay-header "Key=Value"`.
+- Multiple flags are allowed:
+  `--replay-header "Authorization=Bearer tok" --replay-header "X-Req-Id=123"`.
+- The flag is split on the first `=` sign; keys without `=` are rejected
+  as a usage error.
+
+##### Design choices
+
+1. **`map[string]string` (single value per key)**: HTTP allows multiple
+   values per header key, but the override use case is almost always
+   "replace the value". A map keeps the API simple. Users who need
+   multi-valued headers can call `WithReplayHeaders` with the
+   canonical comma-separated form.
+
+2. **Applied after tape headers, before Content-Length removal**: this
+   ensures replay headers always win over recorded values, and
+   Content-Length is still recalculated by `net/http` from the actual
+   body.
+
+3. **No effect on fallback/error responses**: replay headers are only
+   injected on successful tape matches. Fallback (no-match) and
+   simulated error responses are not modified — they are synthetic
+   responses from httptape itself, not from recorded tapes.
+
+4. **Repeatable CLI flag via `flag.Value` interface**: Go's `flag`
+   package supports custom value types. A `repeatableFlag` (string
+   slice) collects multiple `--replay-header` invocations.
+
+##### File placement
+
+- `server.go` -- `WithReplayHeaders` option, `replayHeaders` field,
+  injection in `ServeHTTP`
+- `server_test.go` -- new test cases
+- `cmd/httptape/main.go` -- `--replay-header` flag, `repeatableFlag` type
+
+##### Test plan
+
+- Header override: tape has `Authorization: original`, replay header
+  sets `Authorization: injected` — response has injected value.
+- Multiple overrides: three different replay headers all appear in
+  response.
+- No override when not set: default server leaves tape headers untouched.
+
+#### Consequences
+
+- **Non-breaking**: `WithReplayHeaders` is a new opt-in option. Existing
+  behavior is unchanged when no replay headers are configured.
+- **Environment-portable fixtures**: fixtures can be recorded once and
+  replayed in different environments by injecting environment-specific
+  headers at serve time, without editing fixture files.
+- **stdlib only**: no new dependencies.
+- **Single-value limitation**: the `map[string]string` design means only
+  one value per header key. This is acceptable for the target use cases.
+  If multi-value support is needed later, the API can be extended with a
+  `WithReplayHeaderValues(key string, values ...string)` option without
+  breaking the existing API.
