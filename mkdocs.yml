@@ -1,0 +1,85 @@
+site_name: httptape
+site_description: HTTP traffic recording, sanitization, and replay for Go.
+site_url: https://vibewarden.dev/docs/httptape
+repo_url: https://github.com/VibeWarden/httptape
+repo_name: VibeWarden/httptape
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: deep purple
+      accent: cyan
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: deep purple
+      accent: cyan
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+    - toc.follow
+
+plugins:
+  - search
+  - minify:
+      minify_html: true
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.tabbed:
+      alternate_style: true
+  - tables
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - Core Concepts:
+      - Recording: recording.md
+      - Replay: replay.md
+      - Sanitization: sanitization.md
+      - Matching: matching.md
+      - Storage: storage.md
+  - Guides:
+      - Fixture Authoring: fixtures-authoring.md
+      - Import/Export: import-export.md
+      - UI-First Development: ui-first-dev.md
+      - Other Languages: other-languages.md
+  - Operations:
+      - Configuration: config.md
+      - CLI: cli.md
+      - Docker: docker.md
+      - Testcontainers: testcontainers.md
+  - API Reference: api-reference.md
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/VibeWarden/httptape

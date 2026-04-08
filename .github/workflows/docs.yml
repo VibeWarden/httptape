@@ -1,0 +1,32 @@
+name: Deploy docs to vibewarden.dev
+
+on:
+  push:
+    branches: [main]
+    paths: ["docs/**", "mkdocs.yml", ".github/workflows/docs.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install mkdocs-material==9.5.* mkdocs-minify-plugin pymdown-extensions
+      - run: mkdocs build --strict --site-dir _site/docs
+      - uses: peaceiris/actions-gh-pages@v4
+        with:
+          deploy_key: ${{ secrets.DOCS_DEPLOY_KEY }}
+          external_repository: vibewarden/vibewarden.dev
+          publish_branch: main
+          publish_dir: ./_site/docs
+          destination_dir: docs/httptape
+          keep_files: true
+          commit_message: "docs: sync from vibewarden/httptape@${{ github.sha }}"
