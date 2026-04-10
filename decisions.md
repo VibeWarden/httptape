@@ -6992,3 +6992,309 @@ API needed.
 - `proxy_test.go` -- unit tests for all paths
 - `cmd/httptape/main.go` -- `runProxy` function, `proxy` subcommand routing,
   updated usage text
+
+
+---
+
+### ADR-27: Pluggable Faker interface with format-preserving adapters
+
+**Date**: 2026-03-30
+**Issue**: #116
+**Status**: Accepted
+
+#### Context
+
+ADR-7 introduced `FakeFields` with hardcoded type detection (email, UUID,
+numeric, generic string). While this covers common cases, it falls short
+for format-sensitive fields: phone numbers (`+1-555-867-5309` becomes
+`fake_a1b2c3d4`), credit card numbers (no Luhn validation), SSNs, dates,
+and prefix-bearing API tokens (`sk_test_...`). UI display logic and
+client-side validation break when the faked value does not preserve the
+structural format of the original.
+
+The existing `fakeValue` function is an auto-detecting dispatcher. Rather
+than adding ever more detection heuristics, we need a pluggable system
+where users can explicitly assign a faking strategy per field path.
+
+Key constraints from the project constitution:
+- Hexagonal architecture: the `Faker` interface is a port; each built-in
+  faker is an adapter.
+- stdlib only: all implementations use `crypto/hmac`, `crypto/sha256`,
+  `encoding/hex`, `strconv`, `fmt`, `time` -- no external libraries.
+- Deterministic: same seed + same input = same output, always.
+- Backward compatible: `FakeFields` must continue to work unchanged.
+- `SanitizeFunc` contract: return a copy, never mutate the input.
+- No panics in hot paths.
+
+#### Decision
+
+##### 1. The `Faker` interface (port)
+
+```go
+// Faker is a port that produces deterministic fake values from a seed and
+// an original value. Implementations must be deterministic: the same seed
+// and original value must always produce the same output.
+//
+// The seed is the project-level HMAC key. The original is the JSON value
+// being faked (string, float64, bool, nil, map[string]any, []any).
+// The return value replaces the original in the sanitized output.
+type Faker interface {
+    Fake(seed string, original any) any
+}
+```
+
+This is placed in `faker.go` alongside all built-in adapter types. The
+interface is intentionally minimal (one method) to maximize composability
+and keep the implementation burden low for custom fakers.
+
+##### 2. Built-in faker adapters
+
+All adapters are exported struct types implementing `Faker`. Each uses
+`computeHMAC(seed, stringRepr)` from `sanitizer.go` to derive
+deterministic output from the HMAC hash bytes.
+
+| Type | Behavior | Fields |
+|------|----------|--------|
+| `RedactedFaker` | Returns `[REDACTED]` for strings, `0` for numbers, `false` for bools | None |
+| `FixedFaker` | Returns a caller-supplied constant value | `Value any` |
+| `HMACFaker` | `fake_<hex8>` for strings, positive int for numbers (current generic behavior) | None |
+| `EmailFaker` | `user_<hex8>@example.com` (current email behavior) | None |
+| `PhoneFaker` | Digit-by-digit HMAC replacement preserving original formatting (dashes, spaces, parens, plus signs) | None |
+| `CreditCardFaker` | Preserves issuer prefix (first 6 digits), fills middle with HMAC-derived digits, computes valid Luhn check digit | None |
+| `NumericFaker` | HMAC-derived decimal digits of specified length | `Length int` |
+| `DateFaker` | Deterministic date from epoch offset (2000-01-01 + HMAC-derived days mod ~100 years), formatted with caller-specified Go `time.Format` layout | `Format string` |
+| `PatternFaker` | Fills `#` with digits (0-9), `?` with lowercase letters (a-z), literal chars preserved | `Pattern string` |
+| `PrefixFaker` | `<prefix><hex8>` | `Prefix string` |
+| `AddressFaker` | `<number> <street> <suffix>, <city>, <state> <zip>` with deterministic components drawn from small built-in lists (10 entries each) indexed by HMAC bytes | None |
+
+**Determinism guarantee**: every faker derives its output solely from
+`computeHMAC(seed, fmt.Sprintf("%v", original))`. No randomness, no
+global state, no time-dependent logic.
+
+**Luhn algorithm for `CreditCardFaker`**: The check digit is computed
+using the standard Luhn mod-10 algorithm over the first 15 digits
+(6-digit issuer prefix from the original + 9 HMAC-derived digits). This
+is a pure arithmetic function -- no external dependencies.
+
+**`PhoneFaker` digit-by-digit replacement**: Each digit in the original
+string is replaced with an HMAC-derived digit (0-9). All non-digit
+characters (dashes, spaces, parentheses, plus signs) are preserved in
+their original positions, maintaining the phone number's formatting.
+If the HMAC bytes are exhausted, a new HMAC is computed from the
+current output to chain additional bytes.
+
+**`DateFaker` epoch offset generation**: The first 4 HMAC bytes are
+interpreted as a uint32 days offset from 2000-01-01, modulo 36525
+(~100 years). The resulting date is formatted using the caller-specified
+Go `time.Format` layout string (default: "2006-01-02").
+
+**`AddressFaker` built-in data**: A small hardcoded list of 10 street
+names, 10 street suffixes, 10 city names, and 50 US state abbreviations. The HMAC bytes
+select indices into these lists. The house number is derived from the
+first 2 HMAC bytes (range [1-9999]). The zip code is 5 HMAC-derived
+digits.
+
+##### 3. `FakeFieldsWith` constructor
+
+```go
+// FakeFieldsWith returns a SanitizeFunc that replaces field values in JSON
+// request and response bodies with deterministic fakes using explicitly
+// assigned Faker implementations per path.
+//
+// The seed is a project-level secret used as the HMAC key. The fields map
+// associates JSONPath-like paths with specific Faker implementations.
+//
+// This gives callers explicit control over the faking strategy for each
+// field, unlike FakeFields which auto-detects the strategy from the value.
+func FakeFieldsWith(seed string, fields map[string]Faker) SanitizeFunc
+```
+
+Internally, `FakeFieldsWith` parses all map keys as paths at construction
+time (same as `FakeFields`), then at execution time traverses the JSON
+body and calls `faker.Fake(seed, originalValue)` for each matched leaf.
+
+The traversal logic (`fakeAtPathWith`) mirrors `fakeAtPath` but accepts
+a `Faker` instead of calling `fakeValue`. This avoids modifying the
+existing `fakeAtPath` function, preserving backward compatibility.
+
+##### 4. Backward compatibility
+
+`FakeFields(seed, paths...)` remains unchanged. Internally it continues
+to call `fakeValue`, which is the existing auto-detecting dispatcher.
+`fakeValue` is **not** refactored to use the `Faker` interface -- this
+avoids any risk of behavioral change for existing users.
+
+A future ADR may refactor `fakeValue` to delegate to the built-in fakers,
+but that is out of scope here.
+
+##### 5. JSON config changes
+
+The `Rule` struct gains a new `Fields` field:
+
+```go
+type Rule struct {
+    Action  string            `json:"action"`
+    Headers []string          `json:"headers,omitempty"`
+    Paths   []string          `json:"paths,omitempty"`
+    Seed    string            `json:"seed,omitempty"`
+    Fields  map[string]any    `json:"fields,omitempty"`
+}
+```
+
+For the `"fake"` action, the config now supports two mutually exclusive
+modes:
+
+1. **`paths` mode** (existing): array of paths, auto-detection.
+   ```json
+   {"action": "fake", "seed": "s", "paths": ["$.email", "$.phone"]}
+   ```
+
+2. **`fields` mode** (new): map of path -> faker spec.
+   ```json
+   {"action": "fake", "seed": "s", "fields": {
+     "$.email": "email",
+     "$.phone": "phone",
+     "$.card.number": "credit_card",
+     "$.card.cvv": {"type": "numeric", "length": 3},
+     "$.ssn": {"type": "pattern", "pattern": "###-##-####"}
+   }}
+   ```
+
+**Parsing rules for faker specs**:
+
+- **String shorthand**: maps to a zero-value faker by name.
+  | String | Faker |
+  |--------|-------|
+  | `"redacted"` | `RedactedFaker{}` |
+  | `"hmac"` | `HMACFaker{}` |
+  | `"email"` | `EmailFaker{}` |
+  | `"phone"` | `PhoneFaker{}` |
+  | `"credit_card"` | `CreditCardFaker{}` |
+  | `"address"` | `AddressFaker{}` |
+
+- **Object form**: `{"type": "<name>", ...params}`. The `type` field
+  selects the faker; remaining fields are type-specific parameters.
+  | Type | Extra fields | Faker |
+  |------|-------------|-------|
+  | `"numeric"` | `"length": int` | `NumericFaker{Length: n}` |
+  | `"date"` | `"format": string` | `DateFaker{Format: f}` |
+  | `"pattern"` | `"pattern": string` | `PatternFaker{Pattern: p}` |
+  | `"prefix"` | `"prefix": string` | `PrefixFaker{Prefix: p}` |
+  | `"fixed"` | `"value": any` | `FixedFaker{Value: v}` |
+  | All shorthands | (none) | Corresponding zero-value faker |
+
+**Validation**: `Validate()` checks:
+- `paths` and `fields` are mutually exclusive for a `"fake"` rule.
+- At least one of `paths` or `fields` must be present.
+- All keys in `fields` must be valid paths (via `parsePath`).
+- All faker specs must resolve to known types.
+- Required parameters must be present (e.g., `"pattern"` requires
+  `"pattern"` field, `"numeric"` requires `"length"` > 0).
+
+**`BuildPipeline`**: when `fields` is present, the rule maps to
+`FakeFieldsWith(seed, parsedFakers)` instead of `FakeFields(seed, paths...)`.
+
+##### 6. `config.schema.json` update
+
+The JSON Schema is updated to reflect the new `fields` property on
+`"fake"` rules, with `oneOf` constraining the mutual exclusivity of
+`paths` vs `fields`. The faker spec schema uses `oneOf` for string
+shorthand vs object form.
+
+##### 7. File placement
+
+- **`faker.go`** (new file): `Faker` interface, all built-in faker
+  struct types and their `Fake` methods, `FakeFieldsWith` constructor,
+  `fakeAtPathWith` traversal, `fakeBodyFieldsWith` body processor, Luhn
+  helper. Rationale: `sanitizer.go` is already 579 lines; adding ~400
+  lines of faker types would push it past maintainable size. A dedicated
+  file keeps the faker port/adapter boundary clean.
+- **`faker_test.go`** (new file): unit tests for every faker, including
+  Luhn validation for `CreditCardFaker`, format validation for
+  `PhoneFaker` and `DateFaker`, determinism tests (same seed+input =
+  same output), and `FakeFieldsWith` integration tests.
+- **`sanitizer.go`**: no changes. `fakeValue` and `FakeFields` remain
+  as-is.
+- **`config.go`**: updated `Rule` struct, updated `Validate()` for
+  `fields` support, updated `BuildPipeline()` to emit `FakeFieldsWith`
+  when `fields` is present, new `parseFakerSpec` helper.
+- **`config_test.go`**: new test cases for `fields` mode parsing,
+  validation, and pipeline building.
+- **`config.schema.json`**: updated schema.
+
+##### 8. Implementation details for key fakers
+
+**`CreditCardFaker.Fake`**:
+```
+1. Extract issuer prefix (first 6 digits) from original string
+   (stripping non-digit chars). If fewer than 6 digits, use "400000".
+2. Compute HMAC of the original value.
+3. Generate 9 digits from HMAC bytes (each byte mod 10).
+4. Concatenate: prefix (6) + generated (9) = 15 digits.
+5. Compute Luhn check digit over the 15 digits.
+6. Return 16-digit string formatted as "XXXX-XXXX-XXXX-XXXX".
+```
+
+**`luhnCheckDigit(digits string) byte`** (unexported helper):
+```
+Standard Luhn algorithm: iterate digits right-to-left, double every
+second digit, subtract 9 if > 9, sum all, check digit = (10 - sum%10) % 10.
+```
+
+**`PatternFaker.Fake`**:
+```
+1. Compute HMAC of the original value.
+2. Walk the pattern string char by char:
+   - '#' -> next HMAC byte mod 10, rendered as digit char
+   - '?' -> next HMAC byte mod 26, rendered as lowercase letter
+   - anything else -> literal copy
+3. If HMAC bytes exhausted, re-HMAC with the current output as message
+   (chaining). In practice, 32 HMAC bytes cover patterns up to 32
+   placeholders; longer patterns are extremely rare.
+```
+
+**`AddressFaker.Fake`**:
+```
+1. Compute HMAC of the original value.
+2. House number: bytes[0:2] as uint16, mod 9999 + 1.
+3. Street: streetNames[bytes[2] % len(streetNames)] + " " +
+   streetSuffixes[bytes[3] % len(streetSuffixes)]
+4. City: cityNames[bytes[4] % len(cityNames)]
+5. State: stateAbbrs[bytes[5] % len(stateAbbrs)]
+6. Zip: 5 digits from bytes[6:11], each mod 10.
+7. Return "<number> <street>, <city>, <state> <zip>"
+```
+
+#### Consequences
+
+##### Positive
+- Users gain explicit, fine-grained control over faking strategies per
+  field without losing the convenience of auto-detection.
+- Format-preserving fakers (phone, credit card, date, pattern) prevent
+  client-side validation breakage in recorded fixtures.
+- The `Faker` interface enables users to implement custom fakers for
+  domain-specific formats.
+- Full backward compatibility: `FakeFields` behavior is untouched.
+- JSON config gains expressive power without breaking existing configs.
+
+##### Negative
+- New file (`faker.go`) adds ~400 lines of code. This is acceptable
+  given the number of distinct faker types.
+- `AddressFaker` hardcodes US-format addresses. Locale-aware faking is
+  explicitly out of scope (per issue #116) and can be addressed in a
+  future ADR.
+- The `Rule.Fields` field uses `map[string]any` for JSON flexibility,
+  requiring runtime type assertions in `parseFakerSpec`. This is a
+  pragmatic trade-off for supporting both string shorthand and object
+  form in JSON.
+
+##### Risks
+- Luhn implementation must be correct. Mitigated by table-driven tests
+  with known-good card numbers.
+- `PatternFaker` HMAC chaining (for patterns > 32 placeholders) adds
+  complexity. Mitigated by the fact that such long patterns are
+  exceedingly rare in practice.
+
+##### Migration
+- No migration needed. Existing configs using `"paths"` continue to work
+  unchanged. New `"fields"` syntax is opt-in.

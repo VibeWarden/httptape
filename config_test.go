@@ -1,6 +1,7 @@
 package httptape
 
 import (
+	"encoding/json"
 	"net/http"
 	"os"
 	"strings"
@@ -372,6 +373,211 @@ func TestConfig_Programmatic(t *testing.T) {
 	}
 	if len(pipeline.funcs) != 2 {
 		t.Errorf("pipeline.funcs len = %d, want 2", len(pipeline.funcs))
+	}
+}
+
+func TestLoadConfig_FieldsMode(t *testing.T) {
+	input := `{
+		"version": "1",
+		"rules": [
+			{
+				"action": "fake",
+				"seed": "my-seed",
+				"fields": {
+					"$.email": "email",
+					"$.phone": "phone",
+					"$.card": "credit_card",
+					"$.addr": "address",
+					"$.token": "hmac",
+					"$.secret": "redacted",
+					"$.cvv": {"type": "numeric", "length": 3},
+					"$.ssn": {"type": "pattern", "pattern": "###-##-####"},
+					"$.dob": {"type": "date", "format": "2006-01-02"},
+					"$.ref": {"type": "prefix", "prefix": "ref_"},
+					"$.status": {"type": "fixed", "value": "active"}
+				}
+			}
+		]
+	}`
+
+	cfg, err := LoadConfig(strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(cfg.Rules) != 1 {
+		t.Fatalf("len(rules) = %d, want 1", len(cfg.Rules))
+	}
+	if cfg.Rules[0].Action != ActionFake {
+		t.Errorf("action = %q, want %q", cfg.Rules[0].Action, ActionFake)
+	}
+	if len(cfg.Rules[0].Fields) != 11 {
+		t.Errorf("len(fields) = %d, want 11", len(cfg.Rules[0].Fields))
+	}
+}
+
+func TestLoadConfig_FieldsValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		wantErr string
+	}{
+		{
+			name:    "paths and fields mutually exclusive",
+			input:   `{"version":"1","rules":[{"action":"fake","seed":"s","paths":["$.x"],"fields":{"$.y":"email"}}]}`,
+			wantErr: "cannot use both",
+		},
+		{
+			name:    "neither paths nor fields",
+			input:   `{"version":"1","rules":[{"action":"fake","seed":"s"}]}`,
+			wantErr: "requires non-empty",
+		},
+		{
+			name:    "invalid path in fields key",
+			input:   `{"version":"1","rules":[{"action":"fake","seed":"s","fields":{"badpath":"email"}}]}`,
+			wantErr: "invalid path syntax",
+		},
+		{
+			name:    "unknown faker shorthand",
+			input:   `{"version":"1","rules":[{"action":"fake","seed":"s","fields":{"$.x":"unknown_faker"}}]}`,
+			wantErr: "unknown faker shorthand",
+		},
+		{
+			name:    "numeric missing length",
+			input:   `{"version":"1","rules":[{"action":"fake","seed":"s","fields":{"$.x":{"type":"numeric"}}}]}`,
+			wantErr: "requires \"length\" > 0",
+		},
+		{
+			name:    "pattern missing pattern",
+			input:   `{"version":"1","rules":[{"action":"fake","seed":"s","fields":{"$.x":{"type":"pattern"}}}]}`,
+			wantErr: "requires non-empty \"pattern\"",
+		},
+		{
+			name:    "prefix missing prefix",
+			input:   `{"version":"1","rules":[{"action":"fake","seed":"s","fields":{"$.x":{"type":"prefix"}}}]}`,
+			wantErr: "requires non-empty \"prefix\"",
+		},
+		{
+			name:    "fixed missing value",
+			input:   `{"version":"1","rules":[{"action":"fake","seed":"s","fields":{"$.x":{"type":"fixed"}}}]}`,
+			wantErr: "requires a \"value\"",
+		},
+		{
+			name:    "unknown faker type in object",
+			input:   `{"version":"1","rules":[{"action":"fake","seed":"s","fields":{"$.x":{"type":"bogus"}}}]}`,
+			wantErr: "unknown faker type",
+		},
+		{
+			name:    "invalid spec type",
+			input:   `{"version":"1","rules":[{"action":"fake","seed":"s","fields":{"$.x":42}}]}`,
+			wantErr: "must be a string or object",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := LoadConfig(strings.NewReader(tt.input))
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error = %q, want to contain %q", err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestConfig_BuildPipeline_Fields(t *testing.T) {
+	cfg := &Config{
+		Version: "1",
+		Rules: []Rule{
+			{
+				Action: ActionFake,
+				Seed:   "test-seed",
+				Fields: map[string]any{
+					"$.email": "email",
+					"$.phone": "phone",
+				},
+			},
+		},
+	}
+
+	pipeline := cfg.BuildPipeline()
+	if pipeline == nil {
+		t.Fatal("BuildPipeline returned nil")
+	}
+	if len(pipeline.funcs) != 1 {
+		t.Errorf("pipeline.funcs len = %d, want 1", len(pipeline.funcs))
+	}
+
+	// Apply to a tape and verify transformation.
+	tape := Tape{
+		Request: RecordedReq{
+			Body:    []byte(`{"email":"alice@corp.com","phone":"555-1234","name":"Alice"}`),
+			Headers: make(map[string][]string),
+		},
+		Response: RecordedResp{
+			Body:    []byte(`{"email":"bob@corp.com","phone":"555-5678"}`),
+			Headers: make(map[string][]string),
+		},
+	}
+
+	result := pipeline.Sanitize(tape)
+
+	// Check request body.
+	var reqData map[string]any
+	if err := json.Unmarshal(result.Request.Body, &reqData); err != nil {
+		t.Fatalf("unmarshal request: %v", err)
+	}
+	email := reqData["email"].(string)
+	if !strings.HasSuffix(email, "@example.com") {
+		t.Errorf("email = %q, want *@example.com", email)
+	}
+	if reqData["name"] != "Alice" {
+		t.Errorf("name = %v, want \"Alice\"", reqData["name"])
+	}
+}
+
+func TestParseFakerSpec_ObjectShorthand(t *testing.T) {
+	// Object form with a shorthand type name (no extra params).
+	spec := map[string]any{"type": "email"}
+	f, err := parseFakerSpec(spec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := f.(EmailFaker); !ok {
+		t.Errorf("expected EmailFaker, got %T", f)
+	}
+}
+
+func TestParseFakerSpec_AllShorthands(t *testing.T) {
+	shorthands := []string{"redacted", "hmac", "email", "phone", "credit_card", "address"}
+	for _, s := range shorthands {
+		t.Run(s, func(t *testing.T) {
+			f, err := parseFakerSpec(s)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if f == nil {
+				t.Fatal("got nil faker")
+			}
+		})
+	}
+}
+
+func TestParseFakerSpec_DateDefaultFormat(t *testing.T) {
+	spec := map[string]any{"type": "date"}
+	f, err := parseFakerSpec(spec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	df, ok := f.(DateFaker)
+	if !ok {
+		t.Fatalf("expected DateFaker, got %T", f)
+	}
+	// Format can be empty; DateFaker defaults to "2006-01-02" internally.
+	if df.Format != "" {
+		t.Errorf("format = %q, want empty (default)", df.Format)
 	}
 }
 
