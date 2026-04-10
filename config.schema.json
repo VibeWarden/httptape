@@ -74,10 +74,71 @@
                   "minLength": 3
                 },
                 "minItems": 1,
-                "description": "JSONPath-like paths to fake in request/response bodies."
+                "description": "JSONPath-like paths to fake in request/response bodies (auto-detection mode)."
+              },
+              "fields": {
+                "type": "object",
+                "minProperties": 1,
+                "description": "Map of JSONPath-like paths to faker specifications (explicit faker mode). Mutually exclusive with 'paths'.",
+                "additionalProperties": {
+                  "oneOf": [
+                    {
+                      "type": "string",
+                      "enum": ["redacted", "hmac", "email", "phone", "credit_card", "address"],
+                      "description": "Faker shorthand name."
+                    },
+                    {
+                      "type": "object",
+                      "required": ["type"],
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "description": "Faker type name."
+                        },
+                        "length": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "description": "Length for 'numeric' faker."
+                        },
+                        "format": {
+                          "type": "string",
+                          "description": "Go time format for 'date' faker."
+                        },
+                        "pattern": {
+                          "type": "string",
+                          "minLength": 1,
+                          "description": "Pattern for 'pattern' faker. '#' = digit, '?' = letter."
+                        },
+                        "prefix": {
+                          "type": "string",
+                          "minLength": 1,
+                          "description": "Prefix for 'prefix' faker."
+                        },
+                        "value": {
+                          "description": "Fixed value for 'fixed' faker."
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  ]
+                }
               }
             },
-            "required": ["action", "seed", "paths"],
+            "required": ["action", "seed"],
+            "oneOf": [
+              {
+                "required": ["paths"],
+                "properties": {
+                  "fields": false
+                }
+              },
+              {
+                "required": ["fields"],
+                "properties": {
+                  "paths": false
+                }
+              }
+            ],
             "additionalProperties": false
           }
         ]

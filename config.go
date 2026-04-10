@@ -44,12 +44,17 @@ type Config struct {
 //
 //   - "redact_headers": Headers (optional; defaults to DefaultSensitiveHeaders)
 //   - "redact_body":    Paths (required, non-empty)
-//   - "fake":           Seed (required, non-empty) and Paths (required, non-empty)
+//   - "fake":           Seed (required, non-empty) and either Paths or Fields (mutually exclusive)
+//
+// For "fake" rules, Fields maps JSONPath-like paths to faker specifications.
+// A faker spec is either a string shorthand (e.g., "email", "phone") or an
+// object with a "type" field and type-specific parameters.
 type Rule struct {
-	Action  string   `json:"action"`
-	Headers []string `json:"headers,omitempty"`
-	Paths   []string `json:"paths,omitempty"`
-	Seed    string   `json:"seed,omitempty"`
+	Action  string         `json:"action"`
+	Headers []string       `json:"headers,omitempty"`
+	Paths   []string       `json:"paths,omitempty"`
+	Seed    string         `json:"seed,omitempty"`
+	Fields  map[string]any `json:"fields,omitempty"`
 }
 
 // LoadConfig reads a JSON sanitization config from r, validates it, and
@@ -145,12 +150,25 @@ func (c *Config) Validate() error {
 			if rule.Seed == "" {
 				errs = append(errs, fmt.Sprintf("%s: %q requires non-empty \"seed\"", prefix, rule.Action))
 			}
-			if len(rule.Paths) == 0 {
-				errs = append(errs, fmt.Sprintf("%s: %q requires non-empty \"paths\"", prefix, rule.Action))
+			hasPaths := len(rule.Paths) > 0
+			hasFields := len(rule.Fields) > 0
+			if hasPaths && hasFields {
+				errs = append(errs, fmt.Sprintf("%s: %q cannot use both \"paths\" and \"fields\"", prefix, rule.Action))
+			}
+			if !hasPaths && !hasFields {
+				errs = append(errs, fmt.Sprintf("%s: %q requires non-empty \"paths\" or \"fields\"", prefix, rule.Action))
 			}
 			for _, p := range rule.Paths {
 				if _, ok := parsePath(p); !ok {
 					errs = append(errs, fmt.Sprintf("%s: %q invalid path syntax: %q", prefix, rule.Action, p))
+				}
+			}
+			for path, spec := range rule.Fields {
+				if _, ok := parsePath(path); !ok {
+					errs = append(errs, fmt.Sprintf("%s: %q invalid path syntax: %q", prefix, rule.Action, path))
+				}
+				if _, err := parseFakerSpec(spec); err != nil {
+					errs = append(errs, fmt.Sprintf("%s: %q field %q: %v", prefix, rule.Action, path, err))
 				}
 			}
 			if len(rule.Headers) > 0 {
@@ -181,10 +199,94 @@ func (c *Config) BuildPipeline() *Pipeline {
 		case ActionRedactBody:
 			funcs = append(funcs, RedactBodyPaths(rule.Paths...))
 		case ActionFake:
-			funcs = append(funcs, FakeFields(rule.Seed, rule.Paths...))
+			if len(rule.Fields) > 0 {
+				fakers := make(map[string]Faker, len(rule.Fields))
+				for path, spec := range rule.Fields {
+					f, _ := parseFakerSpec(spec) // already validated
+					fakers[path] = f
+				}
+				funcs = append(funcs, FakeFieldsWith(rule.Seed, fakers))
+			} else {
+				funcs = append(funcs, FakeFields(rule.Seed, rule.Paths...))
+			}
 		}
 	}
 
 	return NewPipeline(funcs...)
+}
+
+// validShorthands maps string shorthand names to zero-value faker constructors.
+var validShorthands = map[string]func() Faker{
+	"redacted":    func() Faker { return RedactedFaker{} },
+	"hmac":        func() Faker { return HMACFaker{} },
+	"email":       func() Faker { return EmailFaker{} },
+	"phone":       func() Faker { return PhoneFaker{} },
+	"credit_card": func() Faker { return CreditCardFaker{} },
+	"address":     func() Faker { return AddressFaker{} },
+}
+
+// parseFakerSpec parses a faker specification from a config value.
+// The spec can be a string shorthand (e.g., "email") or an object with
+// a "type" field and type-specific parameters.
+func parseFakerSpec(spec any) (Faker, error) {
+	switch v := spec.(type) {
+	case string:
+		ctor, ok := validShorthands[v]
+		if !ok {
+			return nil, fmt.Errorf("unknown faker shorthand %q", v)
+		}
+		return ctor(), nil
+
+	case map[string]any:
+		typeName, ok := v["type"].(string)
+		if !ok || typeName == "" {
+			return nil, fmt.Errorf("faker object requires a \"type\" string field")
+		}
+
+		// Check if it's a shorthand name used in object form (no extra params).
+		if ctor, ok := validShorthands[typeName]; ok {
+			return ctor(), nil
+		}
+
+		switch typeName {
+		case "numeric":
+			length, ok := v["length"].(float64)
+			if !ok || length <= 0 {
+				return nil, fmt.Errorf("\"numeric\" faker requires \"length\" > 0")
+			}
+			return NumericFaker{Length: int(length)}, nil
+
+		case "date":
+			format, _ := v["format"].(string)
+			return DateFaker{Format: format}, nil
+
+		case "pattern":
+			pattern, ok := v["pattern"].(string)
+			if !ok || pattern == "" {
+				return nil, fmt.Errorf("\"pattern\" faker requires non-empty \"pattern\" field")
+			}
+			return PatternFaker{Pattern: pattern}, nil
+
+		case "prefix":
+			prefix, ok := v["prefix"].(string)
+			if !ok || prefix == "" {
+				return nil, fmt.Errorf("\"prefix\" faker requires non-empty \"prefix\" field")
+			}
+			return PrefixFaker{Prefix: prefix}, nil
+
+		case "fixed":
+			val, ok := v["value"]
+			if !ok {
+				return nil, fmt.Errorf("\"fixed\" faker requires a \"value\" field")
+			}
+			return FixedFaker{Value: val}, nil
+
+		default:
+			return nil, fmt.Errorf("unknown faker type %q", typeName)
+		}
+
+	default:
+		return nil, fmt.Errorf("faker spec must be a string or object, got %T", spec)
+	}
 }
 
