@@ -1,6 +1,7 @@
 # .github/workflows/release.yml
 #
-# Build multi-platform binaries and publish a GitHub Release.
+# Run tests and publish a GitHub Release with auto-generated notes.
+# httptape is a Go library — no binaries needed.
 # Triggers: semver tags (v*).
 
 name: Release
@@ -13,7 +14,7 @@ permissions:
   contents: write
 
 jobs:
-  test:
+  release:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -27,61 +28,7 @@ jobs:
       - name: Run tests
         run: go test -race -count=1 ./...
 
-  release:
-    needs: test
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - goos: linux
-            goarch: amd64
-          - goos: linux
-            goarch: arm64
-          - goos: darwin
-            goarch: amd64
-          - goos: darwin
-            goarch: arm64
-          - goos: windows
-            goarch: amd64
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-
-      - name: Build binary
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-        run: |
-          EXT=""
-          if [ "$GOOS" = "windows" ]; then EXT=".exe"; fi
-          OUTPUT="httptape-${GOOS}-${GOARCH}${EXT}"
-          CGO_ENABLED=0 go build -trimpath \
-            -ldflags="-s -w -X main.version=${{ github.ref_name }}" \
-            -o "${OUTPUT}" ./cmd/httptape
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: httptape-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: httptape-*
-
-  publish:
-    needs: release
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-          merge-multiple: true
-
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: artifacts/*
