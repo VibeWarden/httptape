@@ -435,6 +435,55 @@ func TestWithProxyTLSConfig_CustomTransport(t *testing.T) {
 	}
 }
 
+// TestWithProxyTLSConfig_DoesNotMutateDefaultTransport verifies that using
+// WithProxyTLSConfig without a custom transport does not mutate
+// http.DefaultTransport.
+func TestWithProxyTLSConfig_DoesNotMutateDefaultTransport(t *testing.T) {
+	defaultTransport := http.DefaultTransport.(*http.Transport)
+	originalTLS := defaultTransport.TLSClientConfig
+
+	tlsCfg := &tls.Config{InsecureSkipVerify: true}
+	l1 := NewMemoryStore()
+	l2 := NewMemoryStore()
+	proxy := NewProxy(l1, l2, WithProxyTLSConfig(tlsCfg))
+
+	// The proxy must have a new transport, not the default one.
+	if proxy.transport == http.DefaultTransport {
+		t.Fatal("expected proxy transport to differ from http.DefaultTransport")
+	}
+
+	// http.DefaultTransport must not have been mutated.
+	if defaultTransport.TLSClientConfig != originalTLS {
+		t.Fatal("http.DefaultTransport.TLSClientConfig was mutated by WithProxyTLSConfig")
+	}
+}
+
+// TestWithRecorderTLSConfig_DoesNotMutateDefaultTransport verifies that using
+// WithRecorderTLSConfig without a custom transport does not mutate
+// http.DefaultTransport.
+func TestWithRecorderTLSConfig_DoesNotMutateDefaultTransport(t *testing.T) {
+	defaultTransport := http.DefaultTransport.(*http.Transport)
+	originalTLS := defaultTransport.TLSClientConfig
+
+	tlsCfg := &tls.Config{InsecureSkipVerify: true}
+	store := NewMemoryStore()
+	recorder := NewRecorder(store,
+		WithAsync(false),
+		WithRecorderTLSConfig(tlsCfg),
+	)
+	defer recorder.Close()
+
+	// The recorder must have a new transport, not the default one.
+	if recorder.transport == http.DefaultTransport {
+		t.Fatal("expected recorder transport to differ from http.DefaultTransport")
+	}
+
+	// http.DefaultTransport must not have been mutated.
+	if defaultTransport.TLSClientConfig != originalTLS {
+		t.Fatal("http.DefaultTransport.TLSClientConfig was mutated by WithRecorderTLSConfig")
+	}
+}
+
 // TestWithRecorderTLSConfig_CustomTransport verifies that TLS config is
 // applied to an existing *http.Transport.
 func TestWithRecorderTLSConfig_CustomTransport(t *testing.T) {

@@ -167,6 +167,10 @@ func WithRecorderTLSConfig(cfg *tls.Config) RecorderOption {
 			return
 		}
 		if t, ok := r.transport.(*http.Transport); ok {
+			if t == http.DefaultTransport.(*http.Transport) {
+				r.transport = &http.Transport{TLSClientConfig: cfg}
+				return
+			}
 			t.TLSClientConfig = cfg
 			return
 		}

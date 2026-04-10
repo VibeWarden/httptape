@@ -107,6 +107,10 @@ func WithProxyTLSConfig(cfg *tls.Config) ProxyOption {
 			return
 		}
 		if t, ok := p.transport.(*http.Transport); ok {
+			if t == http.DefaultTransport.(*http.Transport) {
+				p.transport = &http.Transport{TLSClientConfig: cfg}
+				return
+			}
 			t.TLSClientConfig = cfg
 			return
 		}
