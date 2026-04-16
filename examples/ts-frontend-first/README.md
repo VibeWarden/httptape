@@ -28,16 +28,27 @@ Three services in docker-compose:
 
 | Upstream state | Source served | Badge |
 |---|---|---|
-| Reachable | Live response from upstream, cached in L1 (raw) and L2 (redacted) | green **Live** |
+| Reachable | Live response from upstream, cached in L1 (raw) and L2 (redacted on write) | green **Live** |
 | Down, L1 has the entry | L1 cached response (raw, current session) | yellow **L1 Cache** |
-| Down, L1 empty (fresh proxy start) | L2 cache (disk, redacted seed) | red **L2 Cache** |
+| Down, L1 empty (fresh proxy start) | L2 cache (disk, redacted) | red **L2 Cache** |
 
-The upstream and L2 fixtures contain visibly different data so you can tell them apart at a glance:
+L2 is generated, not committed — the proxy fills it on first request from upstream and falls back to it when upstream is gone. Lives at `./.httptape-cache/fixtures/` (gitignored).
 
-| | Upstream (live) | L2 cache (seed) |
+### Telling the sources apart
+
+The compelling signal is **on-write redaction in action** — L2 is what hits disk, so httptape's typed fakers (configured in `mocks/sanitize.json`) replace every PII field with realistic-but-fake equivalents on the way down. Real example from one run:
+
+| Field (profile) | Live (from upstream) | L2 (after redaction) |
 |---|---|---|
-| Prices | Precise (`$49.95`) | Rounded (`$50.00`) |
-| Descriptions | Detailed | Shorter, suffixed `(cached)` |
+| `name` | `Alice Johnson` | `Evelyn Martinez` (NameFaker) |
+| `email` | `alice.johnson@acme-corp.com` | `user_3b5de929@example.com` (EmailFaker — `user_` prefix marks it as faked in the UI) |
+| `phone` | `+1-555-867-5309` | `+0-472-470-7484` (PhoneFaker) |
+| `card.number` | `4532-0158-2736-9841` | `4532-0194-9786-3174` (CreditCardFaker — Luhn-valid) |
+| `card.expiry` | `03/28` | `11/98` (DateFaker) |
+| `card.cvv` | `847` | `686` (NumericFaker, length=3) |
+| `address` | `742 Evergreen Terrace, Springfield` | `7564 Pine Way, Fairview, KY 85992` (AddressFaker) |
+
+Each fake is **deterministic for a given seed** — the same input always produces the same fake, so fixtures stay stable across reruns. Product fields have no PII, so they look identical in live vs L2 — the visible signal there is just the badge color.
 
 ## Live status updates
 
@@ -82,7 +93,7 @@ The `./scripts/toggle-upstream.sh` script does the stop/start dance.
 # Terminal 2: proxy with health endpoint
 /tmp/httptape proxy \
   --upstream http://localhost:8082 \
-  --fixtures ./mocks/fixtures \
+  --fixtures ./.httptape-cache/fixtures \
   --config ./mocks/sanitize.json \
   --port 3001 \
   --cors --fallback-on-5xx \
@@ -94,12 +105,9 @@ VITE_API_URL=http://localhost:3001 npm run dev
 
 ## Adding new endpoints
 
-For each new endpoint, drop a JSON fixture into both:
+Drop a JSON fixture into `mocks/upstream-fixtures/` — that's the "real" backend response the simulated upstream serves. The L2 cache will populate automatically on first request through the proxy. httptape picks up new upstream fixtures without restart.
 
-- `mocks/upstream-fixtures/` — the "real" backend response
-- `mocks/fixtures/` — the L2 seed cache (committed alongside source — should be already-redacted)
-
-Each file is a single httptape `Tape` (request/response pair). httptape picks up new fixtures without restart.
+Each file is a single httptape `Tape` (request/response pair).
 
 ## Project layout
 
@@ -114,11 +122,12 @@ ts-frontend-first/
       ArchitectureDiagram.tsx    # live diagram of upstream/cache state
       Instructions.tsx           # the "Try it" copy-button list
   mocks/
-    upstream-fixtures/           # "real" responses (precise prices)
-    fixtures/                    # L2 seed cache (rounded prices, "(cached)" suffix)
+    upstream-fixtures/           # source of truth — committed
     sanitize.json                # httptape redaction config (typed fakers)
   scripts/
     toggle-upstream.sh           # one-liner to flip upstream up/down
+  .httptape-cache/               # L2 cache — generated, gitignored
+    fixtures/                    # populated on first request, used as L2 fallback
   docker-compose.yml             # 3 services, builds httptape:demo from ../../
   Dockerfile                     # multi-stage build for the React frontend
 ```

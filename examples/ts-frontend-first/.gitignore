@@ -12,9 +12,9 @@ dist
 dist-ssr
 *.local
 
-# Runtime L2 cache entries (proxy writes UUID-named tapes during use).
-# Curated seed fixtures (get-*.json, post-*.json) stay committed.
-mocks/fixtures/*-*-*-*-*.json
+# L2 cache (runtime — proxy populates it on first request from upstream
+# and falls back to it when upstream is down). Regenerable; not source.
+.httptape-cache/
 
 # Editor directories and files
 .vscode/*

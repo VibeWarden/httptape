@@ -26,7 +26,7 @@ services:
       - --health-endpoint
       - --upstream-probe-interval=2s
     volumes:
-      - ./mocks/fixtures:/fixtures
+      - ./.httptape-cache/fixtures:/fixtures
       - ./mocks/sanitize.json:/config/sanitize.json:ro
     ports:
       - "3001:8081"
