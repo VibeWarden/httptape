@@ -381,7 +381,7 @@ services:
 | Error simulation | `metadata.error` per fixture, `WithErrorRate` global | Per-route rules in GUI |
 | Latency simulation | `metadata.delay` per fixture, `WithDelay` global | Per-route latency in GUI |
 | Go integration | Native -- embeddable in Go tests | None (separate process) |
-| Docker | Minimal scratch image (~10 MB) | Node.js-based image |
+| Docker | Minimal scratch image (~3 MB) | Node.js-based image |
 | CORS | `--cors` flag | Built-in toggle |
 
 **Choose httptape when** you want text-file-based fixtures, Git-friendly diffs, Go test integration, or sanitization.

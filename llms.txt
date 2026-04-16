@@ -100,7 +100,7 @@ httptape import  --fixtures <dir> [--input file.tar.gz]
 
 ```
 docker pull ghcr.io/vibewarden/httptape:latest
-# ~10 MB scratch image, runs as non-root (65534)
+# ~3 MB scratch image, runs as non-root (65534)
 ```
 
 ## JSON Config (redaction rules)

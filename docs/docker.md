@@ -73,7 +73,7 @@ Both are declared as `VOLUME` in the Dockerfile and pre-exist in the image.
 ## Image details
 
 - **Base:** `scratch` (no OS, no shell, no package manager)
-- **Size:** ~10 MB (static Go binary + CA certs)
+- **Size:** ~3 MB (static Go binary + CA certs)
 - **User:** `65534` (nobody) -- runs as non-root
 - **Exposed port:** `8081`
 - **Entrypoint:** `httptape`

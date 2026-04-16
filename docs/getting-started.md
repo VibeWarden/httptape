@@ -4,7 +4,7 @@ Record, Redact, and Replay HTTP traffic in 5 minutes.
 
 ## Prerequisites
 
-- Go 1.22 or later (for the Go library)
+- Go 1.26 or later (for the Go library)
 - Or: Docker (for CLI/Docker usage with any language)
 - `go get github.com/VibeWarden/httptape`
 
@@ -44,11 +44,11 @@ func main() {
     defer resp.Body.Close()
 
     fmt.Println("Recorded:", resp.StatusCode)
-    // A JSON fixture file is now saved in ./fixtures/
+    // After rec.Close() returns, a JSON fixture file is saved in ./fixtures/.
 }
 ```
 
-After running this, check `./fixtures/` -- you will see a JSON file containing the full request and response.
+After running this (and after `rec.Close()` flushes the recorder), check `./fixtures/` -- you will see a JSON file containing the full request and response.
 
 ## Step 2: Replay recorded traffic
 
@@ -95,6 +95,7 @@ package main
 
 import (
     "net/http"
+    "strings"
 
     "github.com/VibeWarden/httptape"
 )
@@ -120,7 +121,7 @@ func main() {
 
     client := &http.Client{Transport: rec}
     client.Post("https://api.example.com/users", "application/json",
-        nil, // your request body here
+        strings.NewReader(`{"password":"hunter2","ssn":"123-45-6789","user":{"email":"alice@example.com","id":42}}`),
     )
 
     // The fixture file now has:
