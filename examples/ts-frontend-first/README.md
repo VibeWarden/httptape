@@ -65,11 +65,11 @@ No polling, no manual refresh. See [`src/useHealthStream.ts`](src/useHealthStrea
 docker compose up
 ```
 
-Pulls `ghcr.io/vibewarden/httptape:v0.9.0` (the version that introduced the health endpoint) and builds the React frontend. No local Go build needed.
+Pulls `ghcr.io/vibewarden/httptape:0.9.0` (the version that introduced the health endpoint) and builds the React frontend. No local Go build needed.
 
 Open [http://localhost:3000](http://localhost:3000).
 
-> Pinned to `v0.9.0` for reproducibility. To track latest, change the image to `ghcr.io/vibewarden/httptape:latest`.
+> Pinned to `0.9.0` for reproducibility. To track latest, change the image to `ghcr.io/vibewarden/httptape:latest`.
 
 ## Try it
 
