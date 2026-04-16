@@ -171,6 +171,38 @@ func (p *Pipeline) Sanitize(t Tape) Tape // implements Sanitizer
 | RedactHeaders | `RedactHeaders(names ...string) SanitizeFunc` |
 | RedactBodyPaths | `RedactBodyPaths(paths ...string) SanitizeFunc` |
 | FakeFields | `FakeFields(seed string, paths ...string) SanitizeFunc` |
+| FakeFieldsWith | `FakeFieldsWith(seed string, fields map[string]Faker) SanitizeFunc` |
+
+### Faker interface
+
+```go
+type Faker interface {
+    Fake(seed string, original any) any
+}
+```
+
+`FakeFieldsWith` wires explicit `Faker` implementations to JSONPath-like paths, in contrast to `FakeFields` which auto-detects the strategy from each value's runtime type.
+
+### Built-in fakers
+
+All twelve are exported struct types and are constructed as struct literals (no `NewXFaker` constructors).
+
+| Type | Construction | Output |
+|---|---|---|
+| `RedactedFaker` | `RedactedFaker{}` | strings -> `"[REDACTED]"`, numbers -> `0`, bools -> `false` |
+| `FixedFaker` | `FixedFaker{Value: any}` | always returns `Value` |
+| `HMACFaker` | `HMACFaker{}` | strings -> `"fake_<hex>"`, numbers -> positive int |
+| `EmailFaker` | `EmailFaker{}` | `"user_<hex>@example.com"` |
+| `PhoneFaker` | `PhoneFaker{}` | digits replaced, format preserved |
+| `CreditCardFaker` | `CreditCardFaker{}` | `XXXX-XXXX-XXXX-XXXX`, prefix preserved, valid Luhn |
+| `NumericFaker` | `NumericFaker{Length: int}` | string of N HMAC-derived digits |
+| `DateFaker` | `DateFaker{Format: string}` | date in Go layout (default `"2006-01-02"`) |
+| `PatternFaker` | `PatternFaker{Pattern: string}` | `#` -> digit, `?` -> letter, others literal |
+| `PrefixFaker` | `PrefixFaker{Prefix: string}` | `"<Prefix><16-hex>"` |
+| `NameFaker` | `NameFaker{}` | `"<First> <Last>"` from internal lists |
+| `AddressFaker` | `AddressFaker{}` | `"<num> <street> <suffix>, <city>, <ST> <zip>"` |
+
+PII-shaped and generic fakers leave non-string inputs unchanged. `RedactedFaker` and `HMACFaker` additionally handle numbers (and `RedactedFaker` handles booleans).
 
 ### Constants and helpers
 
@@ -180,7 +212,7 @@ const Redacted = "[REDACTED]"
 func DefaultSensitiveHeaders() []string
 ```
 
-**Details:** [Redaction](sanitization.md)
+**Details:** [Redaction](sanitization.md#typed-fakers)
 
 ---
 
@@ -302,16 +334,38 @@ type Config struct {
 }
 
 type Rule struct {
-    Action  string   `json:"action"`
-    Headers []string `json:"headers,omitempty"`
-    Paths   []string `json:"paths,omitempty"`
-    Seed    string   `json:"seed,omitempty"`
+    Action  string         `json:"action"`
+    Headers []string       `json:"headers,omitempty"`
+    Paths   []string       `json:"paths,omitempty"`
+    Seed    string         `json:"seed,omitempty"`
+    Fields  map[string]any `json:"fields,omitempty"`
 }
 
 func LoadConfig(r io.Reader) (*Config, error)
 func LoadConfigFile(path string) (*Config, error)
 func (c *Config) Validate() error
 func (c *Config) BuildPipeline() *Pipeline
+```
+
+For `fake` rules, set either `Paths` (for auto-detect, mapping to `FakeFields`) or `Fields` (for typed fakers, mapping to `FakeFieldsWith`) -- the two are mutually exclusive. Each value in `Fields` is either a string shorthand (for example `"email"`) or an object (for example `{"type": "numeric", "length": 3}`). See [Config -> Typed fake fields](config.md#typed-fake-fields) for the full syntax.
+
+Programmatic example:
+
+```go
+cfg := &httptape.Config{
+    Version: "1",
+    Rules: []httptape.Rule{
+        {
+            Action: httptape.ActionFake,
+            Seed:   "my-seed",
+            Fields: map[string]any{
+                "$.user.email": "email",
+                "$.user.cvv":   map[string]any{"type": "numeric", "length": 3},
+            },
+        },
+    },
+}
+pipeline := cfg.BuildPipeline()
 ```
 
 ### Action constants
