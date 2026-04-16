@@ -1,0 +1,21 @@
+{
+  "id": "a1b2c3d4-0003-4000-8000-000000000003",
+  "route": "cart",
+  "recorded_at": "2026-03-30T12:02:00Z",
+  "request": {
+    "method": "POST",
+    "url": "/api/cart",
+    "headers": {
+      "Content-Type": ["application/json"]
+    },
+    "body": null,
+    "body_hash": ""
+  },
+  "response": {
+    "status_code": 201,
+    "headers": {
+      "Content-Type": ["application/json"]
+    },
+    "body": "eyJjYXJ0X2lkIjoiY2FydC1hYmMtMTIzIiwiaXRlbXMiOltdLCJjcmVhdGVkX2F0IjoiMjAyNi0wMy0zMFQxMjowMjowMFoifQ=="
+  }
+}

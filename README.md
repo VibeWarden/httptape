@@ -287,6 +287,14 @@ defer container.Terminate(ctx)
 resp, _ := http.Get(container.BaseURL() + "/api/users")
 ```
 
+## Examples
+
+Runnable end-to-end examples live in [`examples/`](examples/):
+
+- [`ts-frontend-first`](examples/ts-frontend-first/) — Vite + React talking to an httptape proxy with **live** source-state updates over SSE. Demonstrates fallback-to-cache (live → L1 → L2), per-event redaction, and the `/__httptape/health` endpoint.
+
+More examples coming. See [`examples/README.md`](examples/README.md) for the index.
+
 ## How it compares
 
 | Feature | httptape | WireMock | json-server | MSW | gock |

@@ -1,0 +1,19 @@
+{
+  "id": "a1b2c3d4-0001-4000-8000-000000000010",
+  "route": "profile",
+  "recorded_at": "2026-03-30T12:00:00Z",
+  "request": {
+    "method": "GET",
+    "url": "/api/profile",
+    "headers": {},
+    "body": null,
+    "body_hash": ""
+  },
+  "response": {
+    "status_code": 200,
+    "headers": {
+      "Content-Type": ["application/json"]
+    },
+    "body": "eyJuYW1lIjoiQWxpY2UgSm9obnNvbiIsImVtYWlsIjoiYWxpY2Uuam9obnNvbkBhY21lLWNvcnAuY29tIiwicGhvbmUiOiIrMS01NTUtODY3LTUzMDkiLCJjYXJkIjp7Im51bWJlciI6IjQ1MzItMDE1OC0yNzM2LTk4NDEiLCJleHBpcnkiOiIwMy8yOCIsImN2diI6Ijg0NyJ9LCJhZGRyZXNzIjoiNzQyIEV2ZXJncmVlbiBUZXJyYWNlLCBTcHJpbmdmaWVsZCJ9"
+  }
+}
