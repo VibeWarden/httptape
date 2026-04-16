@@ -1,0 +1,19 @@
+{
+  "id": "a1b2c3d4-0001-4000-8000-000000000001",
+  "route": "products",
+  "recorded_at": "2026-03-30T12:00:00Z",
+  "request": {
+    "method": "GET",
+    "url": "/api/products",
+    "headers": {},
+    "body": null,
+    "body_hash": ""
+  },
+  "response": {
+    "status_code": 200,
+    "headers": {
+      "Content-Type": ["application/json"]
+    },
+    "body": "W3siaWQiOjEsIm5hbWUiOiJXaXJlbGVzcyBLZXlib2FyZCIsInByaWNlIjo0OS45NSwiZGVzY3JpcHRpb24iOiJDb21wYWN0IHdpcmVsZXNzIGtleWJvYXJkIHdpdGggY3VzdG9taXphYmxlIFJHQiBiYWNrbGlnaHQgYW5kIGxvdy1wcm9maWxlIG1lY2hhbmljYWwgc3dpdGNoZXMifSx7ImlkIjoyLCJuYW1lIjoiVVNCLUMgSHViIiwicHJpY2UiOjM0LjUwLCJkZXNjcmlwdGlvbiI6IjctaW4tMSBVU0ItQyBodWIgd2l0aCA0SyBIRE1JLCAxMDBXIHBhc3N0aHJvdWdoIGNoYXJnaW5nLCBhbmQgU0QgY2FyZCByZWFkZXIifSx7ImlkIjozLCJuYW1lIjoiTm9pc2UtQ2FuY2VsbGluZyBIZWFkcGhvbmVzIiwicHJpY2UiOjEyOS45NSwiZGVzY3JpcHRpb24iOiJPdmVyLWVhciBoZWFkcGhvbmVzIHdpdGggaHlicmlkIGFjdGl2ZSBub2lzZSBjYW5jZWxsYXRpb24gYW5kIDMwLWhvdXIgYmF0dGVyeSBsaWZlIn1d"
+  }
+}

@@ -1,0 +1,43 @@
+services:
+  upstream:
+    image: httptape:demo
+    build:
+      context: ../..
+    command: ["serve", "--fixtures", "/fixtures"]
+    volumes:
+      - ./mocks/upstream-fixtures:/fixtures:ro
+
+  proxy:
+    image: httptape:demo
+    build:
+      context: ../..
+    command:
+      - proxy
+      - --upstream
+      - http://upstream:8081
+      - --fixtures
+      - /fixtures
+      - --config
+      - /config/sanitize.json
+      - --port
+      - "8081"
+      - --cors
+      - --fallback-on-5xx
+      - --health-endpoint
+      - --upstream-probe-interval=2s
+    volumes:
+      - ./mocks/fixtures:/fixtures
+      - ./mocks/sanitize.json:/config/sanitize.json:ro
+    ports:
+      - "3001:8081"
+    depends_on:
+      - upstream
+
+  frontend:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - VITE_API_URL=http://localhost:3001
+    depends_on:
+      - proxy

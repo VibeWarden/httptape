@@ -1,0 +1,19 @@
+{
+  "id": "a1b2c3d4-0002-4000-8000-000000000002",
+  "route": "products",
+  "recorded_at": "2026-03-30T12:01:00Z",
+  "request": {
+    "method": "GET",
+    "url": "/api/products/1",
+    "headers": {},
+    "body": null,
+    "body_hash": ""
+  },
+  "response": {
+    "status_code": 200,
+    "headers": {
+      "Content-Type": ["application/json"]
+    },
+    "body": "eyJpZCI6MSwibmFtZSI6IldpcmVsZXNzIEtleWJvYXJkIiwicHJpY2UiOjQ5Ljk1LCJkZXNjcmlwdGlvbiI6IkNvbXBhY3Qgd2lyZWxlc3Mga2V5Ym9hcmQgd2l0aCBjdXN0b21pemFibGUgUkdCIGJhY2tsaWdodCBhbmQgbG93LXByb2ZpbGUgbWVjaGFuaWNhbCBzd2l0Y2hlcyIsInN0b2NrIjo0MiwiY2F0ZWdvcnkiOiJwZXJpcGhlcmFscyJ9"
+  }
+}
