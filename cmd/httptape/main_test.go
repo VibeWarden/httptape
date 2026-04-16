@@ -1,11 +1,19 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
+	"errors"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/VibeWarden/httptape"
 )
@@ -184,4 +192,195 @@ func TestExportImportRoundTrip(t *testing.T) {
 	if string(loaded.Response.Body) != string(tape.Response.Body) {
 		t.Errorf("body = %q, want %q", loaded.Response.Body, tape.Response.Body)
 	}
+}
+
+// TestProxyHelpExposesHealthFlags is a documentation regression: --help on
+// the proxy command lists the new flags so operators discover them.
+func TestProxyHelpExposesHealthFlags(t *testing.T) {
+	// Capture stderr where flag.Usage writes.
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	origStderr := os.Stderr
+	os.Stderr = w
+
+	go func() {
+		_ = run([]string{"proxy", "-h"})
+		w.Close()
+	}()
+
+	br := bufio.NewReader(r)
+	var sb strings.Builder
+	for {
+		line, err := br.ReadString('\n')
+		sb.WriteString(line)
+		if err != nil {
+			break
+		}
+	}
+	os.Stderr = origStderr
+
+	got := sb.String()
+	if !strings.Contains(got, "-health-endpoint") {
+		t.Errorf("--health-endpoint missing from proxy help: %s", got)
+	}
+	if !strings.Contains(got, "-upstream-probe-interval") {
+		t.Errorf("--upstream-probe-interval missing from proxy help: %s", got)
+	}
+}
+
+// TestProxyUpstreamProbeIntervalRequiresHealthEndpoint validates the usage
+// guard: --upstream-probe-interval without --health-endpoint is an error.
+func TestProxyUpstreamProbeIntervalRequiresHealthEndpoint(t *testing.T) {
+	tmpDir := t.TempDir()
+	got := run([]string{"proxy",
+		"--upstream", "http://example.com",
+		"--fixtures", tmpDir,
+		"--upstream-probe-interval", "1s",
+	})
+	if got != exitUsage {
+		t.Errorf("got exit %d, want %d (usage)", got, exitUsage)
+	}
+}
+
+// TestProxyHealthEndpointMounted starts the proxy CLI against a fake upstream
+// with --health-endpoint set, then verifies /__httptape/health responds and
+// /__httptape/health/stream emits an initial event.
+func TestProxyHealthEndpointMounted(t *testing.T) {
+	// Fake upstream the proxy will probe.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+	}))
+	defer upstream.Close()
+
+	// Find a free port for the proxy listener.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	ln.Close()
+
+	tmpDir := t.TempDir()
+	args := []string{"proxy",
+		"--upstream", upstream.URL,
+		"--fixtures", tmpDir,
+		"--port", itoa(port),
+		"--health-endpoint",
+		"--upstream-probe-interval", "50ms",
+	}
+
+	// run blocks on ListenAndServe; race a shutdown via SIGINT-like cancel by
+	// closing the os.Stdin/os.Args isn't an option here, so we run in a
+	// goroutine and just kill it after the assertions.
+	done := make(chan int, 1)
+	go func() {
+		done <- run(args)
+	}()
+
+	base := "http://127.0.0.1:" + itoa(port)
+
+	// Wait for the listener to come up.
+	deadline := time.Now().Add(3 * time.Second)
+	var lastErr error
+	for {
+		resp, err := http.Get(base + "/__httptape/health")
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == 200 {
+				break
+			}
+			lastErr = errors.New("non-200 from health endpoint")
+		} else {
+			lastErr = err
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("health endpoint never came up: %v", lastErr)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	resp, err := http.Get(base + "/__httptape/health")
+	if err != nil {
+		t.Fatalf("GET health: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var snap httptape.HealthSnapshot
+	if err := json.NewDecoder(resp.Body).Decode(&snap); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if snap.UpstreamURL != upstream.URL {
+		t.Errorf("UpstreamURL=%q, want %q", snap.UpstreamURL, upstream.URL)
+	}
+	if snap.ProbeIntervalMS != 50 {
+		t.Errorf("ProbeIntervalMS=%d, want 50", snap.ProbeIntervalMS)
+	}
+
+	// SSE: read the initial event.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, "GET", base+"/__httptape/health/stream", nil)
+	streamResp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("subscribe SSE: %v", err)
+	}
+	defer streamResp.Body.Close()
+
+	br := bufio.NewReader(streamResp.Body)
+	gotEvent := atomic.Bool{}
+	go func() {
+		for {
+			line, err := br.ReadString('\n')
+			if err != nil {
+				return
+			}
+			if strings.HasPrefix(strings.TrimSpace(line), "data:") {
+				gotEvent.Store(true)
+				return
+			}
+		}
+	}()
+	deadline = time.Now().Add(2 * time.Second)
+	for !gotEvent.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("SSE initial event not received")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// Trigger shutdown by sending SIGINT to ourselves.
+	p, _ := os.FindProcess(os.Getpid())
+	_ = p.Signal(os.Interrupt)
+
+	select {
+	case code := <-done:
+		_ = code
+	case <-time.After(5 * time.Second):
+		t.Fatal("CLI did not exit after SIGINT")
+	}
+}
+
+func itoa(i int) string {
+	const digits = "0123456789"
+	if i == 0 {
+		return "0"
+	}
+	negative := i < 0
+	if negative {
+		i = -i
+	}
+	var buf [20]byte
+	pos := len(buf)
+	for i > 0 {
+		pos--
+		buf[pos] = digits[i%10]
+		i /= 10
+	}
+	if negative {
+		pos--
+		buf[pos] = '-'
+	}
+	return string(buf[pos:])
 }

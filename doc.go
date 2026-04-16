@@ -47,6 +47,28 @@
 // [MatchMethod], [MatchPath], [MatchQueryParams], [MatchBodyHash]) can be
 // composed for custom matching strategies.
 //
+// # Health endpoints (proxy mode)
+//
+// When a [Proxy] is constructed with [WithProxyHealthEndpoint], it exposes a
+// small technical surface that downstream UIs can use to react to upstream
+// state changes in real time:
+//
+//   - GET /__httptape/health        — JSON snapshot ([HealthSnapshot]).
+//   - GET /__httptape/health/stream — text/event-stream emitting one event
+//     on connect (initial seed) and one event per state transition.
+//
+// State values mirror the existing X-Httptape-Source header semantics
+// ([StateLive], [StateL1Cache], [StateL2Cache]) and are fed by the same code
+// path real client traffic takes, plus an optional active probe configured
+// via [WithProxyProbeInterval]. SSE subscribers whose buffers overflow are
+// disconnected; the EventSource auto-reconnect plus the initial-on-connect
+// event re-seeds correct state. Mount the handler returned by
+// [Proxy.HealthHandler] on your listener and pair [Proxy.Start] /
+// [Proxy.Close] with the lifetime of your HTTP server.
+//
+// With these options absent, [Proxy.HealthHandler] returns nil, no
+// goroutines are started, and proxy behavior is byte-for-byte unchanged.
+//
 // # Design principles
 //
 // httptape follows hexagonal architecture: core types have zero I/O, all

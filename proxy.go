@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 )
 
 // Proxy is an http.RoundTripper that forwards requests to a real backend,
@@ -25,14 +26,29 @@ import (
 //
 // Proxy is safe for concurrent use by multiple goroutines.
 type Proxy struct {
-	transport  http.RoundTripper                   // real backend transport
-	l1         Store                               // raw/ephemeral (typically *MemoryStore)
-	l2         Store                               // sanitized/persistent (typically *FileStore)
-	sanitizer  Sanitizer                           // applied to L2 writes only
-	matcher    Matcher                             // for fallback lookups
-	route      string                              // logical route label
-	onError    func(error)                         // error callback
+	transport  http.RoundTripper                         // real backend transport
+	l1         Store                                     // raw/ephemeral (typically *MemoryStore)
+	l2         Store                                     // sanitized/persistent (typically *FileStore)
+	sanitizer  Sanitizer                                 // applied to L2 writes only
+	matcher    Matcher                                   // for fallback lookups
+	route      string                                    // logical route label
+	onError    func(error)                               // error callback
 	isFallback func(err error, resp *http.Response) bool // determines when to fall back
+
+	// health is the optional HealthMonitor enabled via WithProxyHealthEndpoint.
+	// nil when the option is absent — every call site is nil-receiver-safe so
+	// the default behavior is byte-for-byte identical to a Proxy without the
+	// health surface.
+	health *HealthMonitor
+
+	// healthEnabled tracks whether WithProxyHealthEndpoint was set so the
+	// other health-related options can apply (or noop) deterministically.
+	healthEnabled   bool
+	healthOpts      []HealthMonitorOption
+	probeInterval   time.Duration
+	probePath       string
+	healthErrorFunc func(error)
+	upstreamURLHint string
 }
 
 // ProxyOption configures a Proxy.
@@ -118,6 +134,75 @@ func WithProxyTLSConfig(cfg *tls.Config) ProxyOption {
 	}
 }
 
+// WithProxyHealthEndpoint enables the technical health surface on this Proxy.
+// When set, Proxy.HealthHandler() returns a non-nil http.Handler that serves
+// GET /__httptape/health (JSON snapshot) and GET /__httptape/health/stream
+// (text/event-stream).
+//
+// The active probe loop (if configured via WithProxyProbeInterval) is started
+// the first time Proxy.Start is called — never at construction time, so
+// embedders that build a Proxy without ever serving HTTP do not leak
+// goroutines.
+//
+// With this option absent, Proxy.HealthHandler() returns nil and the request
+// path takes a no-op branch when recording state — preserving byte-for-byte
+// default behavior.
+//
+// opts may inject a clock, an error handler, or other HealthMonitor knobs.
+func WithProxyHealthEndpoint(opts ...HealthMonitorOption) ProxyOption {
+	return func(p *Proxy) {
+		p.healthEnabled = true
+		p.healthOpts = append(p.healthOpts, opts...)
+	}
+}
+
+// WithProxyProbeInterval sets the active probe cadence. Zero disables the
+// probe loop (the request path still updates state, but no synthetic probe
+// runs). When WithProxyHealthEndpoint is set and this option is absent, the
+// default is 2s.
+//
+// This option is a no-op unless WithProxyHealthEndpoint is also set.
+func WithProxyProbeInterval(d time.Duration) ProxyOption {
+	return func(p *Proxy) {
+		if d < 0 {
+			d = 0
+		}
+		p.probeInterval = d
+	}
+}
+
+// WithProxyProbePath sets the URL path the active probe targets on the
+// upstream (default "/"). No-op unless WithProxyHealthEndpoint is also set.
+func WithProxyProbePath(path string) ProxyOption {
+	return func(p *Proxy) {
+		if path != "" {
+			p.probePath = path
+		}
+	}
+}
+
+// WithProxyHealthErrorHandler sets a callback for non-fatal errors inside the
+// health surface (probe transport errors, SSE write errors). Defaults to the
+// existing onError callback set by WithProxyOnError; if neither is set,
+// errors are swallowed. No-op unless WithProxyHealthEndpoint is also set.
+func WithProxyHealthErrorHandler(fn func(error)) ProxyOption {
+	return func(p *Proxy) {
+		p.healthErrorFunc = fn
+	}
+}
+
+// WithProxyUpstreamURL sets the upstream URL reported in the health snapshot
+// and used as the base URL for the active probe. The CLI passes this
+// automatically; library users embedding Proxy with the health surface
+// must set it explicitly.
+//
+// No-op unless WithProxyHealthEndpoint is also set.
+func WithProxyUpstreamURL(url string) ProxyOption {
+	return func(p *Proxy) {
+		p.upstreamURLHint = url
+	}
+}
+
 // NewProxy creates a new Proxy with the given L1 (ephemeral) and L2 (persistent)
 // stores.
 //
@@ -153,7 +238,82 @@ func NewProxy(l1, l2 Store, opts ...ProxyOption) *Proxy {
 		opt(p)
 	}
 
+	if p.healthEnabled {
+		// Default the upstream URL to "" when the embedder didn't provide one.
+		// HealthMonitor's constructor guard panics on empty upstream — give a
+		// clearer message here pointing at the right option.
+		if p.upstreamURLHint == "" {
+			panic("httptape: WithProxyHealthEndpoint requires WithProxyUpstreamURL")
+		}
+
+		// Resolve the error handler precedence: explicit health handler beats
+		// the proxy-wide onError, which beats nothing.
+		var errFn func(error)
+		switch {
+		case p.healthErrorFunc != nil:
+			errFn = p.healthErrorFunc
+		case p.onError != nil:
+			errFn = p.onError
+		}
+
+		// Default probe cadence: 2s when the option is unset.
+		interval := p.probeInterval
+		if interval == 0 {
+			interval = defaultProbeInterval
+		}
+
+		hOpts := []HealthMonitorOption{
+			WithHealthInterval(interval),
+		}
+		if p.probePath != "" {
+			hOpts = append(hOpts, WithHealthProbePath(p.probePath))
+		}
+		if errFn != nil {
+			hOpts = append(hOpts, WithHealthErrorHandler(errFn))
+		}
+		// Caller-supplied options come last so they can override the defaults.
+		hOpts = append(hOpts, p.healthOpts...)
+
+		p.health = NewHealthMonitor(p.upstreamURLHint, p, hOpts...)
+	}
+
 	return p
+}
+
+// HealthHandler returns the http.Handler that serves /__httptape/health and
+// /__httptape/health/stream. Returns nil when WithProxyHealthEndpoint was not
+// set — callers should mount the handler conditionally.
+//
+// The handler routes only the two health paths; any other path returns 404.
+// Callers compose it into their own mux.
+func (p *Proxy) HealthHandler() http.Handler {
+	if p.health == nil {
+		return nil
+	}
+	return p.health
+}
+
+// Start initializes background workers (currently: the active probe loop).
+// Safe to call zero or more times; subsequent calls are no-ops. Must be
+// called before serving HTTP if WithProxyHealthEndpoint and a non-zero probe
+// interval are set, otherwise the probe loop never runs.
+//
+// The CLI wires Start() into the proxy command's startup. Library users
+// embedding the Proxy choose when (and whether) to call it.
+func (p *Proxy) Start() {
+	p.health.start()
+}
+
+// Close stops background workers and closes all open SSE subscribers. Safe
+// to call zero or more times; idempotent. Returns when all goroutines spawned
+// by the Proxy have exited.
+//
+// Close does NOT close the L1/L2 stores — they are owned by the caller.
+func (p *Proxy) Close() error {
+	if p.health == nil {
+		return nil
+	}
+	return p.health.Close()
 }
 
 // RoundTrip executes the HTTP request via the inner transport. On success,
@@ -251,7 +411,10 @@ func (p *Proxy) RoundTrip(req *http.Request) (*http.Response, error) {
 		p.onErrorSafe(saveErr)
 	}
 
-	// 9. Return real response (with body restored).
+	// 9. Update health state (no-op when health surface disabled).
+	p.health.observe(StateLive)
+
+	// 10. Return real response (with body restored).
 	return resp, nil
 }
 
@@ -304,7 +467,8 @@ func (p *Proxy) matchFromStore(ctx context.Context, req *http.Request, store Sto
 
 // tapeToResponse synthesizes an *http.Response from a cached Tape.
 // The source parameter is set as the X-Httptape-Source header to indicate
-// where the response came from ("l1-cache" or "l2-cache").
+// where the response came from ("l1-cache" or "l2-cache"). The same value
+// drives the health-monitor state machine.
 func (p *Proxy) tapeToResponse(tape Tape, source string) *http.Response {
 	header := make(http.Header)
 	if tape.Response.Headers != nil {
@@ -319,6 +483,10 @@ func (p *Proxy) tapeToResponse(tape Tape, source string) *http.Response {
 	if body == nil {
 		body = []byte{}
 	}
+
+	// Update the health state machine (no-op when the health surface is
+	// disabled). A nil-receiver call here keeps the default-off path free.
+	p.health.observe(SourceState(source))
 
 	return &http.Response{
 		StatusCode: tape.Response.StatusCode,

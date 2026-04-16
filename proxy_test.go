@@ -1,14 +1,20 @@
 package httptape
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // roundTripperFunc adapts a function to http.RoundTripper for testing.
@@ -568,5 +574,322 @@ func TestProxy_WithProxyRoute(t *testing.T) {
 	}
 	if l2Tapes[0].Route != "users-api" {
 		t.Errorf("L2 tape route=%q, want %q", l2Tapes[0].Route, "users-api")
+	}
+}
+
+// TestProxy_HealthDisabledByDefault is the backward-compat regression test
+// required by ADR-28: with the new health options absent, the proxy must
+// expose no health surface, spawn no goroutines on Start(), and behave
+// byte-for-byte as before.
+func TestProxy_HealthDisabledByDefault(t *testing.T) {
+	l1 := NewMemoryStore()
+	l2 := NewMemoryStore()
+
+	baseline := runtime.NumGoroutine()
+
+	proxy := NewProxy(l1, l2,
+		WithProxyTransport(successTransport(200, "ok")),
+	)
+
+	if h := proxy.HealthHandler(); h != nil {
+		t.Fatalf("HealthHandler() = %v, want nil with default options", h)
+	}
+
+	// Start must be a no-op when no health monitor exists.
+	proxy.Start()
+	proxy.Start() // idempotent
+	time.Sleep(50 * time.Millisecond)
+	if got := runtime.NumGoroutine(); got > baseline+1 {
+		// Allow +1 for runtime jitter; we expect zero goroutines from Start().
+		t.Errorf("Start() spawned goroutines: baseline=%d, got=%d", baseline, got)
+	}
+
+	// A normal RoundTrip continues to behave exactly as before — no new
+	// headers, no panic on the nil-receiver observe call.
+	req, _ := http.NewRequest("GET", "http://example.com/api/data", nil)
+	resp, err := proxy.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("RoundTrip: %v", err)
+	}
+	resp.Body.Close()
+
+	if src := resp.Header.Get("X-Httptape-Source"); src != "" {
+		t.Errorf("default-off proxy added X-Httptape-Source=%q on success", src)
+	}
+
+	if err := proxy.Close(); err != nil {
+		t.Errorf("Close on default proxy: %v", err)
+	}
+}
+
+// TestProxy_HealthHeaderUnchanged confirms X-Httptape-Source is still emitted
+// on cache fallbacks when the health endpoint is enabled.
+func TestProxy_HealthHeaderUnchanged(t *testing.T) {
+	l1 := NewMemoryStore()
+	l2 := NewMemoryStore()
+
+	tape := NewTape("", RecordedReq{
+		Method: "GET", URL: "http://example.com/x", Headers: http.Header{},
+	}, RecordedResp{
+		StatusCode: 200, Headers: http.Header{}, Body: []byte("cached"),
+	})
+	l1.Save(context.Background(), tape) //nolint:errcheck
+
+	proxy := NewProxy(l1, l2,
+		WithProxyTransport(failingTransport(errors.New("down"))),
+		WithProxyUpstreamURL("http://example.com"),
+		WithProxyHealthEndpoint(),
+		WithProxyProbeInterval(0), // no probe loop in this test
+	)
+	defer proxy.Close() //nolint:errcheck
+
+	req, _ := http.NewRequest("GET", "http://example.com/x", nil)
+	resp, err := proxy.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("RoundTrip: %v", err)
+	}
+	resp.Body.Close()
+
+	if src := resp.Header.Get("X-Httptape-Source"); src != "l1-cache" {
+		t.Errorf("X-Httptape-Source=%q, want l1-cache", src)
+	}
+}
+
+func TestProxy_HealthEndpointMounted(t *testing.T) {
+	l1 := NewMemoryStore()
+	l2 := NewMemoryStore()
+
+	proxy := NewProxy(l1, l2,
+		WithProxyTransport(successTransport(200, "ok")),
+		WithProxyUpstreamURL("http://upstream.example"),
+		WithProxyHealthEndpoint(),
+		WithProxyProbeInterval(0),
+	)
+	defer proxy.Close() //nolint:errcheck
+
+	if proxy.HealthHandler() == nil {
+		t.Fatal("HealthHandler() is nil with WithProxyHealthEndpoint set")
+	}
+
+	srv := httptest.NewServer(proxy.HealthHandler())
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/__httptape/health")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Errorf("status=%d, want 200", resp.StatusCode)
+	}
+	var snap HealthSnapshot
+	if err := json.NewDecoder(resp.Body).Decode(&snap); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if snap.UpstreamURL != "http://upstream.example" {
+		t.Errorf("UpstreamURL=%q", snap.UpstreamURL)
+	}
+}
+
+func TestProxy_StartCloseIdempotent(t *testing.T) {
+	l1 := NewMemoryStore()
+	l2 := NewMemoryStore()
+
+	proxy := NewProxy(l1, l2,
+		WithProxyTransport(successTransport(200, "ok")),
+		WithProxyUpstreamURL("http://up"),
+		WithProxyHealthEndpoint(),
+		WithProxyProbeInterval(20*time.Millisecond),
+	)
+
+	baseline := runtime.NumGoroutine()
+	proxy.Start()
+	proxy.Start()
+	proxy.Start()
+
+	time.Sleep(80 * time.Millisecond)
+
+	if err := proxy.Close(); err != nil {
+		t.Errorf("Close: %v", err)
+	}
+	if err := proxy.Close(); err != nil {
+		t.Errorf("Close (second): %v", err)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if runtime.NumGoroutine() <= baseline+1 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Errorf("goroutine leak: baseline=%d, got=%d", baseline, runtime.NumGoroutine())
+}
+
+// TestProxy_HealthOptionsApplied verifies the additional health-related
+// proxy options (path, error handler) are wired into the resulting monitor.
+func TestProxy_HealthOptionsApplied(t *testing.T) {
+	l1 := NewMemoryStore()
+	l2 := NewMemoryStore()
+
+	var captured atomic.Int32
+	proxy := NewProxy(l1, l2,
+		WithProxyTransport(failingTransport(errors.New("boom"))),
+		WithProxyUpstreamURL("http://up"),
+		WithProxyHealthEndpoint(),
+		WithProxyProbeInterval(15*time.Millisecond),
+		WithProxyProbePath("/healthz"),
+		WithProxyHealthErrorHandler(func(error) { captured.Add(1) }),
+	)
+	defer proxy.Close() //nolint:errcheck
+
+	if proxy.health == nil || proxy.health.probePath != "/healthz" {
+		t.Errorf("probePath not propagated: %+v", proxy.health)
+	}
+
+	proxy.Start()
+	deadline := time.After(2 * time.Second)
+	for captured.Load() == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("custom error handler not invoked")
+		default:
+			time.Sleep(15 * time.Millisecond)
+		}
+	}
+}
+
+// TestProxy_HealthErrorHandlerFallsBackToOnError checks the precedence: a
+// proxy with WithProxyOnError but no explicit health error handler routes
+// probe errors through the existing onError callback.
+func TestProxy_HealthErrorHandlerFallsBackToOnError(t *testing.T) {
+	l1 := NewMemoryStore()
+	l2 := NewMemoryStore()
+
+	var captured atomic.Int32
+	proxy := NewProxy(l1, l2,
+		WithProxyTransport(failingTransport(errors.New("boom"))),
+		WithProxyUpstreamURL("http://up"),
+		WithProxyOnError(func(error) { captured.Add(1) }),
+		WithProxyHealthEndpoint(),
+		WithProxyProbeInterval(15*time.Millisecond),
+	)
+	defer proxy.Close() //nolint:errcheck
+
+	proxy.Start()
+	deadline := time.After(2 * time.Second)
+	for captured.Load() == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("onError fallback not invoked")
+		default:
+			time.Sleep(15 * time.Millisecond)
+		}
+	}
+}
+
+// TestProxy_HealthPanicsWithoutUpstreamURL confirms the constructor guard
+// fires when WithProxyHealthEndpoint is set without WithProxyUpstreamURL.
+func TestProxy_HealthPanicsWithoutUpstreamURL(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected panic when health endpoint enabled without upstream URL")
+		}
+	}()
+	NewProxy(NewMemoryStore(), NewMemoryStore(),
+		WithProxyHealthEndpoint(),
+	)
+}
+
+// TestProxy_HealthIntegration exercises the full path: a transport whose
+// behaviour flips between healthy and broken; the probe drives the state
+// transitions; an SSE subscriber receives the live -> l1-cache -> live
+// sequence without any client-driven request.
+func TestProxy_HealthIntegration(t *testing.T) {
+	l1 := NewMemoryStore()
+	l2 := NewMemoryStore()
+
+	// Pre-populate L1 with a tape matching the probe (HEAD /). The broken
+	// phase's probe will fall back to this entry, driving observe(l1-cache).
+	tape := NewTape("", RecordedReq{
+		Method:  "HEAD",
+		URL:     "http://upstream.example/",
+		Headers: http.Header{},
+	}, RecordedResp{
+		StatusCode: 200,
+		Headers:    http.Header{"Content-Type": {"text/plain"}},
+		Body:       []byte(""),
+	})
+	l1.Save(context.Background(), tape) //nolint:errcheck
+
+	var broken atomic.Bool
+	transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		if broken.Load() {
+			return nil, errors.New("upstream down")
+		}
+		return &http.Response{
+			StatusCode: 200,
+			Header:     http.Header{},
+			Body:       io.NopCloser(strings.NewReader("ok")),
+		}, nil
+	})
+
+	proxy := NewProxy(l1, l2,
+		WithProxyTransport(transport),
+		WithProxyUpstreamURL("http://upstream.example"),
+		WithProxyHealthEndpoint(),
+		WithProxyProbeInterval(20*time.Millisecond),
+	)
+	defer proxy.Close() //nolint:errcheck
+
+	srv := httptest.NewServer(proxy.HealthHandler())
+	defer srv.Close()
+
+	proxy.Start()
+
+	// Subscribe via SSE.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, "GET", srv.URL+"/__httptape/health/stream", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	defer resp.Body.Close()
+
+	br := bufio.NewReader(resp.Body)
+
+	// Drain initial seed.
+	if _, err := readSSEEvent(br, 2*time.Second); err != nil {
+		t.Fatalf("initial event: %v", err)
+	}
+
+	// Break the upstream; probe will fail, fallback hits L1, observe
+	// transitions to l1-cache.
+	broken.Store(true)
+	payload, err := readSSEEvent(br, 3*time.Second)
+	if err != nil {
+		t.Fatalf("expected l1-cache event: %v", err)
+	}
+	var snap HealthSnapshot
+	if err := json.Unmarshal([]byte(payload), &snap); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if snap.State != StateL1Cache {
+		t.Fatalf("expected l1-cache, got %q", snap.State)
+	}
+
+	// Restore the upstream; the next probe sees live, transition fires.
+	broken.Store(false)
+	payload, err = readSSEEvent(br, 3*time.Second)
+	if err != nil {
+		t.Fatalf("expected live recovery event: %v", err)
+	}
+	if err := json.Unmarshal([]byte(payload), &snap); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if snap.State != StateLive {
+		t.Fatalf("expected live, got %q", snap.State)
 	}
 }

@@ -195,6 +195,31 @@ client := &http.Client{Transport: proxy}
 // Upstream down: cached response returned transparently
 ```
 
+### Proxy health endpoints (opt-in)
+
+The proxy can expose a small technical surface for operators and downstream UIs to react to upstream state changes in real time. Off by default; opt in with `--health-endpoint` (CLI) or `WithProxyHealthEndpoint()` (library):
+
+```bash
+httptape proxy --upstream https://api.example.com --fixtures ./cache \
+    --health-endpoint --upstream-probe-interval 2s
+```
+
+```bash
+# JSON snapshot
+curl http://localhost:8081/__httptape/health
+# {"state":"live","upstream_url":"https://api.example.com","probe_interval_ms":2000,"since":"2026-04-16T10:00:00Z","last_probed_at":"2026-04-16T10:00:02Z"}
+
+# SSE stream — one event on connect, one per state transition
+curl -N http://localhost:8081/__httptape/health/stream
+# retry: 2000
+#
+# data: {"state":"live", ... }
+#
+# data: {"state":"l1-cache", ... }
+```
+
+`state` mirrors the existing `X-Httptape-Source` header (`live`, `l1-cache`, `l2-cache`). With both flags absent, no endpoints are mounted and no probe goroutine is started — behavior is byte-for-byte unchanged.
+
 ### Import / Export
 
 ```go
