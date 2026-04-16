@@ -76,6 +76,8 @@ func (r *Recorder) RoundTrip(req *http.Request) (*http.Response, error) // imple
 func (r *Recorder) Close() error
 ```
 
+Panics if `store` is nil.
+
 ### RecorderOption
 
 | Option | Signature | Default |
@@ -104,6 +106,8 @@ func NewProxy(l1, l2 Store, opts ...ProxyOption) *Proxy
 func (p *Proxy) RoundTrip(req *http.Request) (*http.Response, error) // implements http.RoundTripper
 ```
 
+Panics if `l1` or `l2` is nil.
+
 ### ProxyOption
 
 | Option | Signature | Default |
@@ -128,6 +132,8 @@ type Server struct { /* unexported */ }
 func NewServer(store Store, opts ...ServerOption) *Server
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) // implements http.Handler
 ```
+
+Panics if `store` is nil.
 
 ### ServerOption
 
