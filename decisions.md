@@ -7298,3 +7298,794 @@ second digit, subtract 9 if > 9, sum all, check digit = (10 - sum%10) % 10.
 ##### Migration
 - No migration needed. Existing configs using `"paths"` continue to work
   unchanged. New `"fields"` syntax is opt-in.
+
+---
+
+### ADR-28: Health endpoint surface for proxy mode (snapshot + SSE + active probe)
+
+**Date**: 2026-04-16
+**Issue**: #121
+**Status**: Accepted
+
+#### Context
+
+The `Proxy` (ADR-26) currently signals which tier served a request via the
+`X-Httptape-Source` response header (`l1-cache`, `l2-cache`, or absent for live
+upstream). This is per-request and reactive: a UI built on top of the proxy can
+only learn about an upstream outage (or recovery) by issuing a request and
+inspecting the header. Issue #121 introduces a small technical surface so
+operators and downstream UIs (notably the `ts-frontend-first` demo) can react to
+upstream state changes in real time without polling per-request headers.
+
+The PM has locked in:
+
+- **State model = definition B** ("most-recently-served source"): one state
+  machine fed by both real client traffic and a synthetic probe, with values
+  mirroring the existing `X-Httptape-Source` semantics (`live`, `l1-cache`,
+  `l2-cache`).
+- **Backward compatibility is non-negotiable**: with both new flags at
+  defaults, proxy behavior is byte-for-byte identical to today — no new
+  endpoints mounted, no new goroutines, no new headers, `X-Httptape-Source`
+  unchanged.
+- `X-Httptape-Source` stays as the per-request ground truth. The new surface
+  is additive.
+- Library API is required; CLI flags are a thin wrapper.
+- Out of scope: auth, rate limiting, metrics, k8s readiness conventions, SSE
+  `Last-Event-ID` replay, WebSocket transport, surfacing state in
+  serve/record/mock modes, per-visitor outage simulation.
+
+This ADR resolves the open questions left for the architect and pins down the
+types, file layout, concurrency model, probe lifecycle, SSE multiplex strategy,
+and CLI wiring required to ship.
+
+#### Decision
+
+##### Resolution of open questions
+
+| Question | Decision | Rationale |
+|---|---|---|
+| Flag names | `--health-endpoint` (bool), `--upstream-probe-interval` (duration) | Match the PM proposal — short, explicit, scoped. `health-endpoint` covers both `/__httptape/health` and `/__httptape/health/stream` because they are one capability with two surfaces. |
+| Default probe cadence (when `--health-endpoint` is set and the interval is unset) | **2s** | Trade-off between freshness (UI badges feel real-time) and load (one extra HEAD per 2s is invisible to any real upstream). Matches the PM suggestion. Easy to override per deployment. |
+| Probe HTTP method | **HEAD** with **GET fallback** if HEAD returns 405/501 (cached for the lifetime of the proxy after the first GET fallback) | HEAD is the smallest blast radius — no body transfer, no cache pollution at the upstream. But many real backends do not implement HEAD on `/`; once we observe 405 or 501 we sticky-switch to GET. |
+| Probe path | **`/`** (configurable via library option, not via CLI in v1) | Most upstreams answer `/`. Library exposes `WithProxyProbePath` so embedders with stricter upstreams can target a known liveness path. CLI flag is held back to keep the surface minimal until there is concrete demand. |
+| Probe request shape | Synthetic `*http.Request` constructed with the configured upstream URL, fed through `Proxy.RoundTrip` | Honors the "single state machine" property — the probe takes the exact same code path as a real client request. TLS, sanitizer, fallback, L1/L2 writes all behave identically. |
+| SSE back-pressure | **Bounded per-subscriber buffer (size 8) + drop-and-disconnect on overflow** | Keeps the broadcast loop O(N) and lock-free per send. A subscriber whose buffer overflows is removed and its connection is closed (client sees EOF and reconnects via `EventSource` auto-retry). Initial-on-connect event re-seeds state on reconnect, so dropped intermediate events are recoverable from the application's point of view. Documented as a guarantee of the API. |
+| JSON field names | `state`, `upstream_url`, `last_probed_at`, `probe_interval_ms`, `since` (RFC 3339 timestamp of the last *transition* into the current state) | Snake_case to match common JSON conventions and the issue's own suggestion. `since` is a small addition (PM listed only the first four as "at least"); it costs nothing and lets a UI render "in state X for Y seconds" without storing local timestamps. |
+| SSE event name | **Default (`message`) event, no `event:` line** | EventSource clients receive the same payload either way, but defaulting keeps the payload small (no `event:` line per emit) and avoids a needless tag a frontend would have to listen for explicitly. The architectural value of the named event would be event multiplexing on the same stream — out of scope. |
+
+##### New types
+
+All in a single new file `health.go`:
+
+```go
+// SourceState identifies which tier produced the most recent serve through
+// the proxy. Values mirror the X-Httptape-Source response header semantics
+// established in ADR-26.
+type SourceState string
+
+const (
+    StateLive    SourceState = "live"
+    StateL1Cache SourceState = "l1-cache"
+    StateL2Cache SourceState = "l2-cache"
+)
+
+// HealthSnapshot is the JSON payload returned by GET /__httptape/health and
+// emitted on every SSE event on /__httptape/health/stream. It is the single
+// JSON shape all clients see — snapshot and stream agree byte-for-byte at any
+// instant.
+type HealthSnapshot struct {
+    State           SourceState `json:"state"`
+    UpstreamURL     string      `json:"upstream_url"`
+    LastProbedAt    *time.Time  `json:"last_probed_at,omitempty"` // nil until the first probe completes (or when probing is disabled)
+    ProbeIntervalMS int64       `json:"probe_interval_ms"`        // 0 when probing is disabled
+    Since           time.Time   `json:"since"`                    // when the proxy last transitioned into the current state
+}
+
+// HealthMonitor owns the proxy's "most-recently-served source" state, the SSE
+// subscriber set, and the active probe loop. It is created by the Proxy when
+// WithProxyHealthEndpoint is enabled. With the option absent, the Proxy holds
+// a nil *HealthMonitor and the request path takes a fast no-op branch — this
+// preserves byte-for-byte default behavior.
+//
+// HealthMonitor is safe for concurrent use.
+type HealthMonitor struct {
+    upstreamURL   string
+    interval      time.Duration       // 0 = no probe loop
+    probePath     string
+    probeMethod   string              // dynamically promoted from HEAD to GET on 405/501
+    probeMethodMu sync.Mutex          // guards the HEAD->GET promotion only
+    transport     http.RoundTripper   // used by the probe (= the Proxy itself, so probes hit the same resolution path)
+    onError       func(error)
+    now           func() time.Time    // injectable for tests
+
+    // state machine + subscriber set
+    mu          sync.Mutex
+    state       SourceState
+    since       time.Time
+    lastProbed  *time.Time
+    subscribers map[*healthSubscriber]struct{}
+
+    // lifecycle
+    closeOnce sync.Once
+    done      chan struct{} // closed when Close() is called; signals probe loop + handlers to exit
+    wg        sync.WaitGroup // tracks the probe loop goroutine
+}
+
+// HealthMonitorOption configures a HealthMonitor.
+type HealthMonitorOption func(*HealthMonitor)
+
+// healthSubscriber is one connected SSE client. The buffer is bounded; if a
+// send would block (buffer full) the broadcast routine drops the subscriber,
+// closes the buffer, and the handler goroutine exits and writes EOF to the
+// underlying connection.
+type healthSubscriber struct {
+    ch chan HealthSnapshot // capacity = sseBufferSize (8)
+}
+```
+
+Constants used internally (unexported):
+
+```go
+const (
+    sseBufferSize           = 8                       // per-subscriber bounded buffer
+    defaultProbeInterval    = 2 * time.Second
+    defaultProbePath        = "/"
+    defaultProbeMethod      = http.MethodHead
+    healthEndpointPath      = "/__httptape/health"
+    healthStreamPath        = "/__httptape/health/stream"
+    sseRetryBackoffMS       = 2000                    // hint to client via "retry: " field on initial event
+)
+```
+
+##### New `Proxy` options (in `proxy.go`)
+
+```go
+// WithProxyHealthEndpoint enables the health surface on this Proxy. When set,
+// Proxy.HealthHandler() returns a non-nil http.Handler that serves
+// /__httptape/health and /__httptape/health/stream. The probe loop is started
+// the first time the Proxy is mounted (see Proxy.Start) — never at construction
+// time, so embedders that build a Proxy without ever serving HTTP do not leak
+// goroutines.
+//
+// With this option absent, Proxy.HealthHandler() returns nil and the request
+// path takes a no-op branch when recording state — preserving byte-for-byte
+// default behavior.
+func WithProxyHealthEndpoint(opts ...HealthMonitorOption) ProxyOption
+
+// WithProxyProbeInterval sets the active probe cadence. Zero disables the
+// probe loop (the request path still updates state, but no synthetic probe
+// runs). When WithProxyHealthEndpoint is set and this option is absent, the
+// default is 2s.
+//
+// This option is a no-op unless WithProxyHealthEndpoint is also set.
+func WithProxyProbeInterval(d time.Duration) ProxyOption
+
+// WithProxyProbePath sets the URL path the active probe targets on the upstream
+// (default "/"). No-op unless WithProxyHealthEndpoint is also set.
+func WithProxyProbePath(path string) ProxyOption
+
+// WithProxyHealthErrorHandler sets a callback for non-fatal errors inside the
+// health surface (probe transport errors that are NOT a state transition,
+// SSE write errors, etc.). Defaults to the existing onError callback set by
+// WithProxyOnError; if neither is set, errors are swallowed. No-op unless
+// WithProxyHealthEndpoint is also set.
+func WithProxyHealthErrorHandler(fn func(error)) ProxyOption
+```
+
+Note that `WithProxyProbeInterval`, `WithProxyProbePath`, and
+`WithProxyHealthErrorHandler` are top-level `ProxyOption`s rather than
+`HealthMonitorOption`s passed through `WithProxyHealthEndpoint`. Rationale:
+embedders configure the Proxy as one object; they should not have to import a
+sub-options type for what feel like proxy-level knobs. The
+`HealthMonitorOption` slot inside `WithProxyHealthEndpoint` exists for future
+extension (e.g. injecting a clock for tests) without breaking the proxy
+options surface.
+
+##### New `Proxy` methods
+
+```go
+// HealthHandler returns the http.Handler that serves /__httptape/health and
+// /__httptape/health/stream. Returns nil when WithProxyHealthEndpoint was not
+// set — callers should mount the handler conditionally.
+//
+// The handler routes only the two health paths; any other path returns 404.
+// Callers compose it into their own mux (see CLI wiring below).
+func (p *Proxy) HealthHandler() http.Handler
+
+// Start initializes background workers (currently: the active probe loop).
+// Safe to call zero or more times; subsequent calls are no-ops. Must be called
+// before serving HTTP if WithProxyHealthEndpoint and a non-zero probe interval
+// are set, otherwise the probe loop never runs.
+//
+// The CLI wires Start() into the proxy command's startup. Library users
+// embedding the Proxy choose when (and whether) to call it.
+func (p *Proxy) Start()
+
+// Close stops background workers and closes all open SSE subscribers. Safe to
+// call zero or more times; idempotent. Returns when all goroutines spawned by
+// the Proxy have exited (probe loop drained, broadcast goroutine exited if any).
+//
+// Close does NOT close the L1/L2 stores — they are owned by the caller.
+func (p *Proxy) Close() error
+```
+
+`Proxy.Close` is new; ADR-26 did not give `Proxy` a Close method because there
+were no background workers to drain. This is the first feature that needs one.
+Idempotent + nil-safe so existing embedders that never call it (or call it
+twice) are unaffected.
+
+##### `HealthMonitor` methods (mostly unexported, used by `Proxy`)
+
+```go
+// NewHealthMonitor constructs a HealthMonitor. transport is the http.RoundTripper
+// the active probe will hit — in production this is the Proxy itself, so the
+// probe takes the same resolution path as real client traffic. upstreamURL is
+// reported in the snapshot. opts may inject a clock or additional knobs.
+//
+// upstreamURL must be non-empty and transport must be non-nil.
+func NewHealthMonitor(upstreamURL string, transport http.RoundTripper, opts ...HealthMonitorOption) *HealthMonitor
+
+// observe is called by the Proxy on every served request (including probe-driven
+// ones) with the source the response was served from. It is the only mutator
+// of the state machine and the only emitter of SSE events.
+//
+// observe is a no-op when called on a nil *HealthMonitor — this is the fast
+// path for proxies built without WithProxyHealthEndpoint.
+func (h *HealthMonitor) observe(src SourceState)
+
+// snapshot returns the current state as a HealthSnapshot value. Safe to call
+// concurrently with observe and broadcast.
+func (h *HealthMonitor) snapshot() HealthSnapshot
+
+// subscribe registers a new SSE subscriber and returns its receive channel
+// plus an unsubscribe func. The channel is closed when the subscriber is
+// dropped (either by overflow or by Close).
+func (h *HealthMonitor) subscribe() (<-chan HealthSnapshot, func())
+
+// runProbe is the active probe loop. Started exactly once by Proxy.Start.
+// Exits when h.done is closed.
+func (h *HealthMonitor) runProbe(ctx context.Context)
+
+// ServeHTTP routes /__httptape/health and /__httptape/health/stream; returns
+// 404 for any other path. HealthMonitor implements http.Handler so it can be
+// mounted directly.
+func (h *HealthMonitor) ServeHTTP(w http.ResponseWriter, r *http.Request)
+
+// Close drains the probe loop, closes all subscriber channels, and is
+// idempotent.
+func (h *HealthMonitor) Close() error
+```
+
+Functional option example:
+
+```go
+// WithHealthClock injects a clock for tests. Defaults to time.Now.
+func WithHealthClock(now func() time.Time) HealthMonitorOption
+```
+
+##### File layout
+
+```
+httptape/
+  health.go              # NEW. SourceState, HealthSnapshot, HealthMonitor,
+                         # HealthMonitorOption, NewHealthMonitor, observe,
+                         # snapshot, subscribe, runProbe, ServeHTTP, Close,
+                         # all unexported helpers and the package-private
+                         # constants listed above.
+  health_test.go         # NEW. Unit tests (see Test strategy below).
+  proxy.go               # MODIFIED. Add Proxy.health *HealthMonitor field,
+                         # WithProxyHealthEndpoint / WithProxyProbeInterval /
+                         # WithProxyProbePath / WithProxyHealthErrorHandler
+                         # options, HealthHandler() / Start() / Close() methods,
+                         # and call p.health.observe(src) in RoundTrip /
+                         # fallback. observe on a nil receiver is a no-op so
+                         # the existing happy paths are unchanged.
+  proxy_test.go          # MODIFIED. Add a single "with both flags at default,
+                         # no goroutines started, no endpoints mounted" guard
+                         # test to lock the backward-compat invariant.
+  cmd/httptape/main.go   # MODIFIED. Add --health-endpoint and
+                         # --upstream-probe-interval flags to runProxy. Build
+                         # ProxyOptions accordingly. If --health-endpoint is
+                         # set, mux the health handler under /__httptape/ and
+                         # forward everything else to the existing reverse
+                         # proxy. Call tapeProxy.Start() and tapeProxy.Close().
+  cmd/httptape/main_test.go  # MODIFIED. Smoke test that --health-endpoint
+                         # changes the listener surface as expected.
+  doc.go                 # MODIFIED. Add a short "Health endpoints" subsection
+                         # documenting the surface.
+  README.md              # MODIFIED. Add a brief proxy-mode health subsection
+                         # mirroring the godoc.
+```
+
+No new top-level files beyond `health.go` / `health_test.go`. No `internal/`.
+No new dependencies — `net/http` + `http.Flusher` + `encoding/json` +
+`time` + `sync` + `context` are all stdlib and already in use.
+
+##### State machine and synchronization
+
+State is a tuple `(state SourceState, since time.Time, lastProbed *time.Time)`
+held inside `HealthMonitor` and guarded by a single `sync.Mutex` (`h.mu`).
+
+Single mutator: `HealthMonitor.observe(src)`. Two readers: `snapshot()` (called
+by the JSON endpoint and also from inside `observe` to build the SSE event
+payload) and `subscribe()` (called by the SSE endpoint).
+
+Why a `sync.Mutex` and not `sync.RWMutex` or `atomic.Pointer`:
+
+- Critical section is tiny (3 string/time field updates + a non-blocking send
+  per subscriber).
+- Writes are infrequent (one per served request + one per probe tick), reads
+  are also infrequent (one per snapshot HTTP call + one per subscribe).
+- An `RWMutex` adds memory and complexity for no measurable benefit at this
+  request rate.
+- `atomic.Pointer[snapshot]` would force a copy-on-write per emit and a
+  separate sync mechanism for the subscriber set anyway.
+
+`observe(src)` algorithm:
+
+```
+1. Compute the next snapshot: state, since, lastProbed.
+   - state = src
+   - if src != h.state: since = h.now() (transition); else since = h.since (no-op)
+2. Acquire h.mu.
+3. Detect transition (src != h.state).
+4. Update h.state, h.since.
+5. If this call is from the probe loop (signaled via a separate `observeProbe`
+   variant), also update h.lastProbed = &now.
+6. If a transition occurred, snapshot the subscriber set into a local slice
+   (cheap; pointers only).
+7. Release h.mu.
+8. For each subscriber pointer, attempt a non-blocking send of the snapshot:
+       select {
+       case sub.ch <- snap:
+       default:
+           // Buffer full: drop and disconnect.
+           h.dropSubscriber(sub)
+       }
+9. If no transition occurred, skip step 6–8 entirely. (Acceptance criterion:
+   no event on confirmation of existing state.)
+```
+
+A separate small entrypoint `observeProbe(src)` exists so the request path
+(`Proxy.RoundTrip`/`fallback`) can call `observe(src)` without bumping
+`lastProbed` (only the probe should update that field), while the probe loop
+calls `observeProbe(src)`. Both share the same locking and broadcast logic.
+
+`subscribe()` algorithm:
+
+```
+1. ch := make(chan HealthSnapshot, sseBufferSize)
+2. sub := &healthSubscriber{ch: ch}
+3. Acquire h.mu.
+4. Capture current snapshot for initial seed.
+5. Add sub to h.subscribers.
+6. Release h.mu.
+7. Send the initial snapshot non-blocking. (Buffer is fresh and capacity 8 so
+   this never blocks — but we still use select/default for paranoia.)
+8. Return ch and an unsubscribe closure.
+```
+
+`dropSubscriber(sub)` algorithm:
+
+```
+1. Acquire h.mu.
+2. If sub not in h.subscribers, release lock and return.
+3. delete(h.subscribers, sub).
+4. close(sub.ch).
+5. Release h.mu.
+```
+
+Closing the channel from the broadcaster (rather than from the SSE handler)
+gives a single owner of the close-channel operation, removing the
+"close-of-closed-channel" race entirely. The SSE handler treats `ch` as
+read-only and exits when it sees the channel closed.
+
+##### SSE multiplex / back-pressure design
+
+Per-subscriber bounded buffer of size 8, drop-and-disconnect on overflow.
+
+Why 8:
+
+- SSE state events are tiny (~150 bytes JSON). 8 events is < 2 KB of memory
+  per subscriber.
+- The fastest plausible event rate is one transition per probe interval (~2s).
+  A subscriber that cannot drain 8 events in 16+ seconds is effectively dead;
+  disconnecting it and letting `EventSource` reconnect is the right answer.
+
+Why drop-and-disconnect over drop-event-only:
+
+- Drop-event-only would let a slow client persistently miss state changes,
+  giving them a stale UI badge with no recovery signal.
+- Disconnect forces a client reconnect; the new connection's
+  initial-on-connect event re-seeds the correct state, so no information is
+  lost from the application's perspective.
+
+Why drop-and-disconnect over disconnect-only (no buffer):
+
+- With buffer = 0, the broadcaster would have to do `select { case ch <- snap;
+  default: drop }` *and* hold the mutex during the send, since concurrent
+  observers could otherwise race to a partial subscriber list. The bounded
+  buffer absorbs short pauses (e.g. SSE handler is in the middle of a
+  `Flush()` call) and keeps the mutex critical section short.
+
+The SSE handler goroutine logic:
+
+```
+1. Verify request is GET. Otherwise 405.
+2. Set headers:
+     Content-Type: text/event-stream
+     Cache-Control: no-cache
+     Connection: keep-alive
+     X-Accel-Buffering: no   (defeats nginx buffering; harmless without nginx)
+3. Type-assert the ResponseWriter to http.Flusher; if it doesn't implement
+   Flusher, return 500. (Modern net/http does; httptest does. Defensive.)
+4. ch, unsub := h.subscribe()
+   defer unsub()
+5. Write a "retry: 2000\n\n" line so EventSource clients reconnect quickly.
+   Flush.
+6. Loop:
+     select {
+     case <-r.Context().Done():
+         // client disconnected
+         return
+     case <-h.done:
+         // proxy shutting down
+         return
+     case snap, ok := <-ch:
+         if !ok {
+             // dropped by broadcaster (overflow or Close)
+             return
+         }
+         payload, _ := json.Marshal(snap)
+         fmt.Fprintf(w, "data: %s\n\n", payload)
+         flusher.Flush()
+     }
+```
+
+Nothing in this loop holds `h.mu`. The broadcaster holds `h.mu` only to
+snapshot the subscriber pointer list, not for the actual sends. Slow flushes
+on one subscriber cannot block other subscribers or the request path.
+
+##### Probe lifecycle
+
+Started by `Proxy.Start()`. Stopped by `Proxy.Close()` via `h.done` channel
+closure.
+
+```go
+func (h *HealthMonitor) runProbe(ctx context.Context) {
+    if h.interval <= 0 {
+        return
+    }
+    defer h.wg.Done()
+
+    ticker := time.NewTicker(h.interval)
+    defer ticker.Stop()
+
+    for {
+        select {
+        case <-h.done:
+            return
+        case <-ticker.C:
+            h.runProbeOnce(ctx)
+        }
+    }
+}
+```
+
+`runProbeOnce` builds a synthetic `*http.Request` against
+`upstreamURL + probePath`, runs it through `h.transport.RoundTrip` (which is
+the Proxy), interprets the result, and calls `h.observeProbe(src)`:
+
+- HEAD response with status < 500 and no `X-Httptape-Source` header → `live`.
+- Any response with `X-Httptape-Source: l1-cache` → `l1-cache`.
+- Any response with `X-Httptape-Source: l2-cache` → `l2-cache`.
+- HEAD response with status 405 or 501 → promote `h.probeMethod` to GET (under
+  `h.probeMethodMu`), do not call `observeProbe` for this tick (the upstream
+  is up but rejected our method — this is not a tier signal).
+- Transport error AND response is nil → do not call `observeProbe`. The
+  Proxy's own fallback already handled state via `observe` if the request
+  produced a tier hit. If the Proxy returned `nil, err` (no cache match), the
+  state stays unchanged — which is the correct behavior per definition B
+  ("if neither cache matched, state remains whatever it was").
+- Always update `h.lastProbed = now()` regardless of outcome (the snapshot
+  field reports "did the probe at least *run*"), via a tiny separate call:
+  `h.recordProbeAttempt()`.
+
+The probe **uses a context derived from `h.done`**, not the long-lived
+`context.Background()` of the Proxy, so a Close immediately cancels any
+in-flight probe RoundTrip.
+
+Probe request shape:
+
+```go
+req, _ := http.NewRequestWithContext(ctx, h.probeMethod, h.upstreamURL+h.probePath, nil)
+req.Header.Set("X-Httptape-Probe", "1")  // diagnostic, not used for routing
+```
+
+The `X-Httptape-Probe` header lets operators see probe traffic in upstream
+access logs and lets future versions filter probes out of recording (out of
+scope here — the probe is recorded normally so it actually feeds L1/L2,
+keeping caches warm).
+
+##### Proxy integration
+
+`Proxy.RoundTrip` and `Proxy.fallback` already know which tier they served
+from. They each gain a single one-line call:
+
+- Top of the success branch (after the upstream call returns and we are about
+  to record): `p.health.observe(StateLive)`.
+- Inside `tapeToResponse`, just before returning to the caller: pass the
+  source string in and call `p.health.observe(src)` (where `src` is `l1-cache`
+  or `l2-cache` mapped to the const).
+- If both fallbacks miss and the original error is returned: do **not** call
+  `observe`. State stays as-is. This matches the PM's locked-in rule.
+
+`p.health.observe(src)` is a no-op when `p.health == nil`, so when
+`WithProxyHealthEndpoint` is not set, this is a single nil-receiver method
+call per request — effectively free, and behavior is byte-for-byte identical.
+
+##### CLI flag wiring
+
+In `cmd/httptape/main.go`'s `runProxy`:
+
+```go
+healthEndpoint := fs.Bool("health-endpoint", false,
+    "Mount /__httptape/health (JSON snapshot) and /__httptape/health/stream (SSE).")
+upstreamProbeInterval := fs.Duration("upstream-probe-interval", 0,
+    "Active upstream probe cadence. 0 = disabled. When --health-endpoint is set "+
+    "and this is unset, defaults to 2s.")
+```
+
+After parsing:
+
+```go
+if *healthEndpoint {
+    proxyOpts = append(proxyOpts, httptape.WithProxyHealthEndpoint())
+    interval := *upstreamProbeInterval
+    if interval == 0 {
+        interval = 2 * time.Second
+    }
+    proxyOpts = append(proxyOpts, httptape.WithProxyProbeInterval(interval))
+} else if *upstreamProbeInterval > 0 {
+    return &usageError{fmt.Errorf("--upstream-probe-interval requires --health-endpoint")}
+}
+```
+
+Routing the listener:
+
+```go
+var handler http.Handler = rp
+if hh := tapeProxy.HealthHandler(); hh != nil {
+    mux := http.NewServeMux()
+    mux.Handle("/__httptape/", hh)
+    mux.Handle("/", rp)
+    handler = mux
+}
+// CORS wrapper (existing) goes around `handler` after this.
+```
+
+The path prefix `/__httptape/` is reserved for httptape's technical surface
+and will never be forwarded upstream. (The current proxy has no concept of a
+reserved prefix; this is established by this ADR.)
+
+Lifecycle in `runProxy`:
+
+```go
+tapeProxy.Start()                 // no-op if no probe configured
+defer tapeProxy.Close()           // belt-and-braces; the signal handler also calls it
+
+go func() {
+    <-ctx.Done()
+    // existing httpServer.Shutdown(...) block
+    if err := tapeProxy.Close(); err != nil {
+        logger.Printf("proxy close error: %v", err)
+    }
+}()
+```
+
+##### Sequence diagram (text): upstream goes down → probe detects → SSE fires → frontend re-fetches
+
+```
+t=0       Frontend connects:  GET /__httptape/health/stream
+            -> SSE handler subscribes, sends initial event {state:"live"}
+            -> Frontend renders "LIVE" badge.
+
+t=2s      Probe tick #1:
+            HealthMonitor.runProbeOnce()
+              -> HEAD upstream/  -> 200 OK, no X-Httptape-Source
+              -> observeProbe(StateLive)
+                   no transition (state already "live") => no SSE event
+              -> recordProbeAttempt() updates lastProbed.
+
+t=3s      Upstream goes down (network partition).
+
+t=4s      Probe tick #2:
+            HEAD upstream/  -> transport error
+            Proxy.fallback runs through L1: hit
+              -> tapeToResponse(tape, "l1-cache") returns 200 with
+                 X-Httptape-Source: l1-cache
+              -> Proxy calls p.health.observe(StateL1Cache)
+                   transition live -> l1-cache
+                   broadcast: send {state:"l1-cache",since:t=4s,...} to
+                   every subscriber's bounded channel.
+            runProbeOnce inspects the response, sees l1-cache header, does
+            NOT call observeProbe (already observed by the success/fallback
+            path); only recordProbeAttempt().
+
+t=4s+ms   SSE handler reads from its channel, writes
+            "data: {\"state\":\"l1-cache\",...}\n\n" + flush.
+          Frontend's EventSource onmessage fires.
+          Frontend re-fetches data, swaps badge to "L1 CACHE".
+
+t=10s     Upstream recovers.
+
+t=12s     Probe tick #5:
+            HEAD upstream/  -> 200 OK, no X-Httptape-Source
+            Proxy success path: writes L1+L2, calls
+              p.health.observe(StateLive)
+                transition l1-cache -> live, broadcast.
+          SSE handler emits {state:"live",since:t=12s,...}.
+          Frontend re-fetches, badge back to "LIVE".
+
+t=...     User hits Ctrl-C. SIGTERM -> ctx cancel.
+            Proxy.Close():
+              close(h.done)
+              probe goroutine's select picks <-h.done, returns; wg.Wait drains.
+              broadcaster snapshot of subscribers + close(ch) for each.
+              SSE handlers' select picks closed channel, return; HTTP write
+              loop unwinds; net/http closes the underlying TCP connection.
+              Frontend EventSource sees onclose; auto-retry (per "retry: 2000")
+              eventually fails when the listener is gone — frontend handles.
+```
+
+##### Error cases
+
+| Where | Symptom | Handling |
+|---|---|---|
+| `NewHealthMonitor` called with empty upstream URL | Programming error | Panic with `httptape: NewHealthMonitor requires a non-empty upstream URL` (constructor guard, per L-11). |
+| `NewHealthMonitor` called with nil transport | Programming error | Panic with `httptape: NewHealthMonitor requires a non-nil transport`. |
+| Probe HEAD returns 405/501 | Upstream does not support HEAD on the probe path | Sticky-promote `h.probeMethod` to GET under `h.probeMethodMu`. Skip `observeProbe` for this tick (no tier signal). Subsequent ticks use GET. |
+| Probe transport error AND no cached fallback | `Proxy.RoundTrip` returned `nil, err` | `runProbeOnce` swallows the error (passes it to `h.onError` if set) and does NOT call `observeProbe`. State stays at its previous value, matching the locked-in rule "if neither cache matched, state remains whatever it was before that failed serve." |
+| Probe transport error WITH cached fallback | Cache hit happened inside the proxy | `Proxy.RoundTrip` already called `observe(StateL1Cache)` or `observe(StateL2Cache)` synchronously. `runProbeOnce` sees the response, does not double-emit. |
+| SSE handler called with non-`http.Flusher` writer | Defensive — net/http always satisfies Flusher | Return 500 with body `httptape: streaming not supported`. |
+| SSE subscriber buffer full | Slow / dead client | Drop subscriber: `close(sub.ch)`, remove from set. Handler goroutine sees closed channel, returns, net/http closes the connection. Client `EventSource` auto-reconnects and re-seeds via initial event. |
+| Health endpoint receives unsupported method (e.g. POST) | Misuse | Return 405 with `Allow: GET`. |
+| Health endpoint receives unknown subpath | Misuse | Return 404. The mux only routes `/__httptape/health` and `/__httptape/health/stream`. |
+| `Proxy.Close` called twice | Idempotency | `closeOnce.Do(...)` ensures workers are drained exactly once. Returns `nil` on subsequent calls. |
+| `Proxy.Start` called twice | Idempotency | `startOnce.Do(...)` ensures the probe goroutine is launched at most once. |
+| JSON marshal of `HealthSnapshot` fails | Cannot happen for these field types | Errors-by-default-discarded; the marshal call is paired with a `_ = err` and a comment explaining the unreachable branch. (No panic, no log spam.) |
+| `json.NewEncoder(w).Encode(snapshot)` on the snapshot endpoint | Network-side error | Errors are passed to `h.onError` if set. The HTTP response is already partially written; nothing actionable beyond logging. |
+
+##### Test strategy
+
+All in `health_test.go` unless noted. Stdlib `testing` only.
+Race-clean (`go test -race ./...`). Coverage target ≥ 90% for `health.go`.
+
+| Test | Pattern | What it verifies |
+|---|---|---|
+| `TestHealthMonitor_InitialState` | direct | New monitor reports `state=live`, `since` ≈ now, `lastProbed=nil`. |
+| `TestHealthMonitor_ObserveTransition` | table-driven | Sequence of `observe` calls produces correct state machine transitions and updates `since` only on transitions. |
+| `TestHealthMonitor_ObserveNoEventOnSameState` | direct | Two consecutive `observe(StateLive)` calls produce exactly one initial SSE event (from subscribe), no follow-up events. |
+| `TestHealthMonitor_BroadcastFanOut` | direct | 100 concurrent subscribers all receive one transition event. |
+| `TestHealthMonitor_SlowSubscriberDropped` | direct | Subscriber that never drains its buffer is dropped after `sseBufferSize+1` transitions; channel is closed; other subscribers are unaffected. |
+| `TestHealthMonitor_SubscribeReceivesInitial` | direct | Newly subscribed client immediately receives the current snapshot. |
+| `TestHealthMonitor_CloseDrainsSubscribers` | direct | After `Close()`, all subscriber channels are closed and `subscribe` returns. |
+| `TestHealthMonitor_CloseStopsProbe` | direct, with a fake transport that records call count | After `Close()`, no further probe RoundTrips occur within 3× the interval. |
+| `TestHealthMonitor_ProbeHEADtoGETPromotion` | direct, with a fake transport returning 405 once | After a 405, subsequent probe ticks use GET; `probeMethod` is sticky. |
+| `TestHealthMonitor_ProbeFedThroughProxy` | integration-ish, in-memory | A fake upstream first succeeds, then errors; L1 cache is primed; probe drives state from `live` to `l1-cache` and back. SSE subscriber receives both transition events without any real client request between transitions. |
+| `TestHealthMonitor_SnapshotJSONShape` | direct | JSON marshals to exactly the documented field set; `last_probed_at` is omitted when nil; `probe_interval_ms` is 0 when probing disabled. |
+| `TestHealthMonitor_HTTPSnapshotEndpoint` | `httptest` | `GET /__httptape/health` returns 200, `Content-Type: application/json`, body matches snapshot. |
+| `TestHealthMonitor_HTTPStreamEndpoint` | `httptest` + `http.Client` reading body line by line | Stream emits an initial `data:` line within 100ms of subscribe and one more `data:` line per `observe` transition. Test waits with timeouts, never `time.Sleep` of fixed duration alone. |
+| `TestHealthMonitor_HTTPStreamGracefulShutdown` | `httptest` | After `Close()`, the stream's body reader sees EOF (not a hung read). |
+| `TestHealthMonitor_HTTPMethodNotAllowed` | `httptest` | POST to either endpoint returns 405 with `Allow: GET`. |
+| `TestProxy_HealthDisabledByDefault` (in `proxy_test.go`) | direct | `NewProxy(...)` without `WithProxyHealthEndpoint` returns a proxy whose `HealthHandler()` is nil. No goroutines started by `Start()`. |
+| `TestProxy_HealthHeaderUnchanged` (in `proxy_test.go`) | direct | With `WithProxyHealthEndpoint` set, `X-Httptape-Source` is still emitted on cache fallbacks. |
+| `TestProxy_StartCloseIdempotent` (in `proxy_test.go`) | direct | `Start()` and `Close()` can each be called twice with no panic and no double-spawn. |
+| `TestCLI_HealthFlags` (in `cmd/httptape/main_test.go`) | smoke | `--health-endpoint` mounts the endpoint; `--upstream-probe-interval` without `--health-endpoint` returns a usage error. |
+
+A goroutine leak check helper (`goleakish`: count goroutines before/after each
+test that involves Close, asserting count returns to baseline) is added at the
+top of `health_test.go`. We avoid the `go.uber.org/goleak` dependency — a
+30-line stdlib helper using `runtime.NumGoroutine` with retry/backoff is
+sufficient for our needs.
+
+##### Backward compatibility verification
+
+The compatibility guarantee is enforced by:
+
+1. **`p.health == nil` fast path**: every new call site
+   (`p.health.observe(...)`) is on a nil-receiver-safe method. With the option
+   absent, the only added cost is one nil-receiver method call per request,
+   which the Go compiler often inlines away entirely.
+2. **Test `TestProxy_HealthDisabledByDefault`** (above): explicitly asserts
+   `HealthHandler() == nil` and that no goroutine starts.
+3. **CLI test**: ensures the proxy mux only diverges from today when the flag
+   is set.
+4. **Header preservation test**: `X-Httptape-Source` is still written by
+   `tapeToResponse`; this is unchanged.
+
+#### Consequences
+
+##### Positive
+
+- Embedders gain a real-time state surface usable from any frontend that
+  speaks SSE (`EventSource` is in every browser).
+- The "single source of truth fed by both real and probe traffic" property
+  means the snapshot endpoint and the SSE stream cannot drift — they read the
+  same field protected by the same mutex.
+- Probe goes through `Proxy.RoundTrip`, so it benefits from every existing
+  proxy feature (TLS, sanitizer, fallback, L1/L2 writes) for free, and
+  warming the caches as a side effect is actually a feature, not a bug.
+- The default-off design makes this a zero-risk change for users not opting
+  in. Existing tests, fixtures, and integration setups are unaffected.
+- New `Proxy.Close` and `Proxy.Start` lifecycle methods give us a clean place
+  to hang future background workers (e.g. periodic L2 compaction) without
+  another API breakage.
+- stdlib only. No new dependencies.
+
+##### Negative
+
+- `Proxy` grows new lifecycle methods (`Start`, `Close`). Any embedder that
+  builds a `Proxy` and never serves it is fine (Start is a no-op, Close on a
+  never-started monitor is a no-op), but anyone using the new options is now
+  expected to pair them with `Close()` for clean shutdown. This is documented
+  in godoc.
+- The bounded-buffer-then-disconnect strategy means a wedged subscriber will
+  miss intermediate events between disconnect and reconnect. We mitigate by
+  emitting the initial snapshot on every (re)connect, so application-visible
+  state is always correct on resume. This is a deliberate trade-off and is
+  documented in godoc on the SSE endpoint.
+- The probe records into L1/L2. For very low-traffic backends this means the
+  cache contains many probe responses. Acceptable: probe responses are
+  legitimate cache entries (HEAD/GET on `/`). If this becomes a problem in
+  practice, a future ADR can add `WithProxyProbeRecord(false)` to skip
+  recording probe traffic.
+- Adds a `/__httptape/` reserved path prefix to the proxy mode. Callers who
+  happened to be routing real upstream traffic on a path beginning with
+  `/__httptape/` (extremely unlikely) would see a behavior change — but only
+  when they opt in via `--health-endpoint`. With the flag off, the prefix is
+  not reserved.
+
+##### Risks
+
+- Goroutine leak on `Close` if the probe loop or an SSE handler is stuck.
+  Mitigated by deriving all blocking operations from contexts/channels we
+  explicitly close, and by the dedicated `TestHealthMonitor_CloseStopsProbe`
+  and goroutine-count check.
+- SSE handler holding the mutex during a slow Flush. Mitigated by design:
+  the handler holds no `HealthMonitor` mutex during Flush; it only reads from
+  its own channel.
+- Panic in user-supplied `onError` propagating into the probe loop. Mitigated
+  by wrapping the callback in `defer recover()` and swallowing the panic with
+  a log line on stderr (matches the existing pattern in
+  `recorder.runDispatcher`).
+
+##### Migration
+
+- No migration needed for existing users. Defaults preserve current behavior.
+- Embedders who want the new surface add `httptape.WithProxyHealthEndpoint()`
+  (and optionally `WithProxyProbeInterval(...)`) to their `NewProxy` call
+  site, and call `Start()` / `Close()` around the lifetime of their HTTP
+  server.
+
+---
+
+## PM Log
+
+### 2026-04-16
+
+- **Created #121** — `feat: technical health endpoint surface for proxy mode (snapshot + SSE + active probe)`.
+  - Labels: `priority:high`. No milestone (per request).
+  - Adds `/__httptape/health` (JSON snapshot) and `/__httptape/health/stream` (SSE) under explicit opt-in CLI flags `--health-endpoint` and `--upstream-probe-interval`. Active background probe feeds the same state machine the request path does.
+  - Settled the "what is state?" question in favor of definition B (most-recently-served source: `live` / `l1-cache` / `l2-cache`) — rationale: aligns with what the consuming UI is communicating to the user and gives a single source of truth fed by both real and synthetic (probe) traffic.
+  - Status comment posted: `READY_FOR_ARCH`.
+  - Open questions flagged for the architect: final flag names, default probe cadence, probe method/path, SSE back-pressure strategy, JSON field names, SSE event-name convention.
+  - Downstream consumer noted: `ts-frontend-first` will switch its badge to drive off the SSE stream once this lands. The hosted-demo / per-visitor outage simulation feature in `~/workspace/httptape-demos/ts-frontend-first/BACKLOG.md` is explicitly out of scope here and depends on this issue landing first.
+
+- **Created #122** — `chore: enrich Docker Hub & GHCR registry pages (OCI labels, README sync, README parity)`.
+  - Labels: `priority:medium`, `documentation`. No milestone (cosmetic/docs scope).
+  - Three concrete deliverables in one chore-issue: (1) add `org.opencontainers.image.*` labels to the root `Dockerfile` (with `version` wired from a build-arg in `.github/workflows/docker.yml`), (2) extend release CI with a `peter-evans/dockerhub-description` step that pushes the GitHub README to Docker Hub on tag pushes, (3) rebalance the README's `## Docker` section so GHCR is given equal billing with Docker Hub instead of being a one-line footnote.
+  - Explicit non-goals: image signing/cosign, SBOM/provenance attestations, vulnerability scanning, renaming the Docker Hub repo, multi-version registry docs. Each is a separate future issue.
+  - Called out that the Docker Hub README sync only takes effect on the *next* push to the registry — merging the PR is not enough on its own to make the hub.docker.com page change. The GHCR auto-link verification is also a post-release manual step (the only acceptance criterion that cannot be confirmed pre-merge).
+  - Open questions flagged for the architect: single consolidated `LABEL` vs. one `LABEL` per key; which workflow file (`docker.yml` vs. `release.yml`) hosts the README-sync step; whether the existing `DOCKERHUB_TOKEN` is scoped wide enough to write the repo description (vs. push-only).
+  - Status comment posted: `READY_FOR_ARCH`.

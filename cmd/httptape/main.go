@@ -335,6 +335,11 @@ func runProxy(args []string) error {
 	tlsKey := fs.String("tls-key", "", "Path to PEM client private key for mTLS")
 	tlsCA := fs.String("tls-ca", "", "Path to PEM CA certificate(s) for upstream verification")
 	tlsInsecure := fs.Bool("tls-insecure", false, "Skip TLS verification (dev only)")
+	healthEndpoint := fs.Bool("health-endpoint", false,
+		"Mount /__httptape/health (JSON snapshot) and /__httptape/health/stream (SSE).")
+	upstreamProbeInterval := fs.Duration("upstream-probe-interval", 0,
+		"Active upstream probe cadence. 0 = disabled. When --health-endpoint is set "+
+			"and this is unset, defaults to 2s.")
 
 	if err := fs.Parse(args); err != nil {
 		return &usageError{err}
@@ -399,6 +404,20 @@ func runProxy(args []string) error {
 		}))
 	}
 
+	if *healthEndpoint {
+		interval := *upstreamProbeInterval
+		if interval == 0 {
+			interval = 2 * time.Second
+		}
+		proxyOpts = append(proxyOpts,
+			httptape.WithProxyUpstreamURL(*upstream),
+			httptape.WithProxyHealthEndpoint(),
+			httptape.WithProxyProbeInterval(interval),
+		)
+	} else if *upstreamProbeInterval > 0 {
+		return &usageError{fmt.Errorf("--upstream-probe-interval requires --health-endpoint")}
+	}
+
 	tapeProxy := httptape.NewProxy(l1, l2, proxyOpts...)
 
 	rp := &httputil.ReverseProxy{
@@ -409,8 +428,17 @@ func runProxy(args []string) error {
 		Transport: tapeProxy,
 	}
 
+	// Compose the listener mux: mount the health surface (if enabled) under
+	// /__httptape/ and forward everything else to the reverse proxy.
 	var handler http.Handler = rp
+	if hh := tapeProxy.HealthHandler(); hh != nil {
+		mux := http.NewServeMux()
+		mux.Handle("/__httptape/", hh)
+		mux.Handle("/", rp)
+		handler = mux
+	}
 	if *cors {
+		inner := handler
 		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Access-Control-Allow-Origin", "*")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS, HEAD")
@@ -421,7 +449,7 @@ func runProxy(args []string) error {
 				w.WriteHeader(http.StatusNoContent)
 				return
 			}
-			rp.ServeHTTP(w, r)
+			inner.ServeHTTP(w, r)
 		})
 	}
 
@@ -434,6 +462,15 @@ func runProxy(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// Start background workers (currently: the active probe loop). No-op when
+	// the health endpoint is disabled.
+	tapeProxy.Start()
+	defer func() {
+		if err := tapeProxy.Close(); err != nil {
+			logger.Printf("proxy close error: %v", err)
+		}
+	}()
+
 	go func() {
 		<-ctx.Done()
 		logger.Println("shutdown initiated")
@@ -442,6 +479,9 @@ func runProxy(args []string) error {
 		if err := httpServer.Shutdown(shutdownCtx); err != nil {
 			logger.Printf("graceful shutdown failed: %v, forcing close", err)
 			httpServer.Close()
+		}
+		if err := tapeProxy.Close(); err != nil {
+			logger.Printf("proxy close error: %v", err)
 		}
 	}()
 
