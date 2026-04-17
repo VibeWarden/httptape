@@ -75,4 +75,10 @@
 // persistence goes through the [Store] port, and all components are
 // configured via functional options. The library has zero external
 // dependencies (stdlib only) and no global mutable state.
+//
+// # Documentation
+//
+// Full documentation, guides, and examples live at
+// https://vibewarden.dev/docs/httptape/. httptape is developed as part of
+// VibeWarden — see https://vibewarden.dev/.
 package httptape
