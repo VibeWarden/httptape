@@ -1157,3 +1157,290 @@ func TestServer_ReplayHeaders_NotSetByDefault(t *testing.T) {
 		t.Errorf("X-Original = %q, want %q", got, "value")
 	}
 }
+
+// --- Templating integration tests ---
+
+func TestServer_Templating_BodySubstitution(t *testing.T) {
+	store := NewMemoryStore()
+	storeTape(t, store, "POST", "/echo", 200,
+		`{"method":"{{request.method}}","path":"{{request.path}}"}`, nil)
+
+	srv := NewServer(store)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/echo", nil)
+
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	want := `{"method":"POST","path":"/echo"}`
+	if got := rec.Body.String(); got != want {
+		t.Errorf("body = %q, want %q", got, want)
+	}
+}
+
+func TestServer_Templating_HeaderSubstitution(t *testing.T) {
+	store := NewMemoryStore()
+	storeTape(t, store, "POST", "/payments", 200, `{"ok":true}`, http.Header{
+		"X-Idempotency-Key": {"{{request.headers.Idempotency-Key}}"},
+	})
+
+	srv := NewServer(store)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/payments", nil)
+	req.Header.Set("Idempotency-Key", "idem-xyz-456")
+
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := rec.Header().Get("X-Idempotency-Key"); got != "idem-xyz-456" {
+		t.Errorf("X-Idempotency-Key = %q, want %q", got, "idem-xyz-456")
+	}
+}
+
+func TestServer_Templating_Disabled(t *testing.T) {
+	store := NewMemoryStore()
+	storeTape(t, store, "GET", "/raw", 200, `{{request.method}}`, nil)
+
+	srv := NewServer(store, WithTemplating(false))
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/raw", nil)
+
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	// With templating disabled, body should be returned verbatim.
+	if got := rec.Body.String(); got != "{{request.method}}" {
+		t.Errorf("body = %q, want %q", got, "{{request.method}}")
+	}
+}
+
+func TestServer_Templating_StrictMode_Error(t *testing.T) {
+	store := NewMemoryStore()
+	storeTape(t, store, "GET", "/strict", 200, `{{request.headers.Missing}}`, nil)
+
+	srv := NewServer(store, WithStrictTemplating(true))
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/strict", nil)
+
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", rec.Code)
+	}
+	if got := rec.Header().Get("X-Httptape-Error"); got != "template" {
+		t.Errorf("X-Httptape-Error = %q, want %q", got, "template")
+	}
+	if !strings.Contains(rec.Body.String(), "request.headers.Missing") {
+		t.Errorf("body = %q, should mention the failed expression", rec.Body.String())
+	}
+}
+
+func TestServer_Templating_StrictMode_HeaderError(t *testing.T) {
+	store := NewMemoryStore()
+	storeTape(t, store, "GET", "/strict-hdr", 200, "ok", http.Header{
+		"X-Echo": {"{{request.headers.Missing}}"},
+	})
+
+	srv := NewServer(store, WithStrictTemplating(true))
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/strict-hdr", nil)
+
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", rec.Code)
+	}
+	if got := rec.Header().Get("X-Httptape-Error"); got != "template" {
+		t.Errorf("X-Httptape-Error = %q, want %q", got, "template")
+	}
+}
+
+func TestServer_Templating_LenientMode_MissingRef(t *testing.T) {
+	store := NewMemoryStore()
+	storeTape(t, store, "GET", "/lenient", 200,
+		`key={{request.headers.Missing}}`, nil)
+
+	srv := NewServer(store) // default: lenient
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/lenient", nil)
+
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := rec.Body.String(); got != "key=" {
+		t.Errorf("body = %q, want %q", got, "key=")
+	}
+}
+
+func TestServer_Templating_NoTemplates_FastPath(t *testing.T) {
+	store := NewMemoryStore()
+	storeTape(t, store, "GET", "/plain", 200, `{"static":"response"}`, nil)
+
+	srv := NewServer(store)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/plain", nil)
+
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := rec.Body.String(); got != `{"static":"response"}` {
+		t.Errorf("body = %q, want %q", got, `{"static":"response"}`)
+	}
+}
+
+func TestServer_Templating_QueryParam(t *testing.T) {
+	store := NewMemoryStore()
+	storeTape(t, store, "GET", "/search", 200,
+		`{"q":"{{request.query.q}}","page":"{{request.query.page}}"}`, nil)
+
+	srv := NewServer(store)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/search?q=hello&page=3", nil)
+
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	want := `{"q":"hello","page":"3"}`
+	if got := rec.Body.String(); got != want {
+		t.Errorf("body = %q, want %q", got, want)
+	}
+}
+
+func TestServer_Templating_BodyField(t *testing.T) {
+	store := NewMemoryStore()
+	storeTape(t, store, "POST", "/echo-body", 200,
+		`{"echo_email":"{{request.body.user.email}}"}`, nil)
+
+	srv := NewServer(store)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/echo-body",
+		strings.NewReader(`{"user":{"email":"test@example.com"}}`))
+
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	want := `{"echo_email":"test@example.com"}`
+	if got := rec.Body.String(); got != want {
+		t.Errorf("body = %q, want %q", got, want)
+	}
+}
+
+func TestServer_Templating_DoesNotModifyStoredFixture(t *testing.T) {
+	store := NewMemoryStore()
+	tape := storeTape(t, store, "GET", "/immutable", 200,
+		`{{request.method}}`, nil)
+
+	srv := NewServer(store)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/immutable", nil)
+
+	srv.ServeHTTP(rec, req)
+
+	// The response should be resolved.
+	if got := rec.Body.String(); got != "GET" {
+		t.Errorf("body = %q, want %q", got, "GET")
+	}
+
+	// The stored fixture should be unchanged.
+	loaded, err := store.Load(context.Background(), tape.ID)
+	if err != nil {
+		t.Fatalf("load tape: %v", err)
+	}
+	if string(loaded.Response.Body) != "{{request.method}}" {
+		t.Errorf("stored body = %q, should be unchanged", string(loaded.Response.Body))
+	}
+}
+
+func TestServer_Templating_WithCORS(t *testing.T) {
+	store := NewMemoryStore()
+	storeTape(t, store, "GET", "/cors-template", 200,
+		`{{request.method}}`, nil)
+
+	srv := NewServer(store, WithCORS())
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/cors-template", nil)
+
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := rec.Body.String(); got != "GET" {
+		t.Errorf("body = %q, want %q", got, "GET")
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Errorf("CORS header missing: %q", got)
+	}
+}
+
+func TestServer_Templating_EnabledByDefault(t *testing.T) {
+	store := NewMemoryStore()
+	storeTape(t, store, "GET", "/default-on", 200, `{{request.method}}`, nil)
+
+	// NewServer without any templating options — should be enabled by default.
+	srv := NewServer(store)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/default-on", nil)
+
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := rec.Body.String(); got != "GET" {
+		t.Errorf("body = %q, want %q (templating should be on by default)", got, "GET")
+	}
+}
+
+func TestServer_Templating_NonRequestNamespace_Literal(t *testing.T) {
+	store := NewMemoryStore()
+	storeTape(t, store, "GET", "/state", 200,
+		`count={{state.counter}}`, nil)
+
+	srv := NewServer(store)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/state", nil)
+
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	// Non-request namespace expressions should be left as-is.
+	if got := rec.Body.String(); got != "count={{state.counter}}" {
+		t.Errorf("body = %q, want %q", got, "count={{state.counter}}")
+	}
+}
+
+func TestServer_Templating_URL(t *testing.T) {
+	store := NewMemoryStore()
+	storeTape(t, store, "GET", "/url-echo", 200,
+		`url={{request.url}}`, nil)
+
+	srv := NewServer(store)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/url-echo?key=val", nil)
+
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := rec.Body.String(); got != "url=/url-echo?key=val" {
+		t.Errorf("body = %q, want %q", got, "url=/url-echo?key=val")
+	}
+}

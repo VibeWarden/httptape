@@ -14,16 +14,18 @@ import (
 // Server is safe for concurrent use by multiple goroutines. All fields are
 // immutable after construction.
 type Server struct {
-	store          Store
-	matcher        Matcher
-	fallbackStatus int              // HTTP status when no tape matches
-	fallbackBody   []byte           // response body when no tape matches
-	onNoMatch      func(*http.Request) // optional callback when no tape matches
-	cors           bool             // if true, add CORS headers to all responses
-	delay          time.Duration    // fixed delay before every response; zero means no delay
-	errorRate      float64          // fraction of requests that return 500 (0.0-1.0)
-	randFloat      func() float64   // random number generator (injectable for testing)
-	replayHeaders  map[string]string // headers injected into every replayed response
+	store            Store
+	matcher          Matcher
+	fallbackStatus   int                 // HTTP status when no tape matches
+	fallbackBody     []byte              // response body when no tape matches
+	onNoMatch        func(*http.Request) // optional callback when no tape matches
+	cors             bool                // if true, add CORS headers to all responses
+	delay            time.Duration       // fixed delay before every response; zero means no delay
+	errorRate        float64             // fraction of requests that return 500 (0.0-1.0)
+	randFloat        func() float64      // random number generator (injectable for testing)
+	replayHeaders    map[string]string   // headers injected into every replayed response
+	templating       bool                // if true, resolve {{request.*}} in responses
+	strictTemplating bool                // if true, unresolvable expressions produce 500
 }
 
 // ServerOption configures a Server.
@@ -109,6 +111,41 @@ func WithReplayHeaders(key, value string) ServerOption {
 	}
 }
 
+// WithTemplating controls whether Mustache-style {{request.*}} template
+// expressions in response bodies and headers are resolved against the
+// incoming request at serve time. When enabled, template expressions are
+// replaced with values from the request (method, path, headers, query
+// params, body fields). When disabled, no scanning or replacement occurs
+// and response bodies/headers are written exactly as stored.
+//
+// Templating is enabled by default. The {{...}} delimiter is vanishingly
+// rare in real HTTP payloads, so enabling it by default is safe. Users who
+// only replay recorded traffic (no {{ in fixtures) see zero behavioral
+// change, as the fast path skips processing for bodies without "{{".
+//
+// See also WithStrictTemplating for error handling of unresolvable
+// expressions.
+func WithTemplating(enabled bool) ServerOption {
+	return func(s *Server) { s.templating = enabled }
+}
+
+// WithStrictTemplating controls the error behavior when a template
+// expression cannot be resolved. When strict is true, an unresolvable
+// expression (e.g., referencing a missing header) causes the server to
+// return HTTP 500 with an X-Httptape-Error: template header and a body
+// describing which expression failed. When strict is false (the default),
+// unresolvable expressions are silently replaced with an empty string.
+//
+// Strict mode is useful in tests where fixture authoring mistakes should
+// be caught early. Lenient mode is useful for production-like tests where
+// a missing value is acceptable.
+//
+// Strict mode has no effect when templating is disabled via
+// WithTemplating(false).
+func WithStrictTemplating(strict bool) ServerOption {
+	return func(s *Server) { s.strictTemplating = strict }
+}
+
 // withRandFloat overrides the random number generator for testing.
 // This is unexported -- only used in tests to make error simulation
 // deterministic.
@@ -126,6 +163,7 @@ func withRandFloat(fn func() float64) ServerOption {
 //   - CORS disabled
 //   - no delay
 //   - no error simulation
+//   - templating enabled (lenient mode)
 //
 // The store must not be nil. Passing a nil store is a programming error and
 // will panic.
@@ -139,6 +177,7 @@ func NewServer(store Store, opts ...ServerOption) *Server {
 		matcher:        DefaultMatcher(),
 		fallbackStatus: http.StatusNotFound,
 		fallbackBody:   []byte("httptape: no matching tape found"),
+		templating:     true,
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -162,8 +201,9 @@ func NewServer(store Store, opts ...ServerOption) *Server {
 //  3. Normal replay -- existing match-and-respond logic
 //  4. Per-fixture error override -- after matching, before writing
 //  5. Delay -- sleep before writing the real response
-//  6. Replay header injection -- override/add headers from WithReplayHeaders
-//  7. Write response
+//  6. Templating -- resolve {{request.*}} expressions in body and headers
+//  7. Replay header injection -- override/add headers from WithReplayHeaders
+//  8. Write response
 //
 // Performance note: ServeHTTP calls Store.List with an empty filter on every
 // request, resulting in an O(n) scan over all tapes. This is acceptable for
@@ -258,20 +298,39 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 8. Write the matched tape's response.
-	// 8a: copy response headers (clone slices to prevent aliasing with tape data).
-	for key, values := range tape.Response.Headers {
+	// 8. Templating -- resolve {{request.*}} expressions in response body and headers.
+	respBody := tape.Response.Body
+	respHeaders := tape.Response.Headers
+	if s.templating {
+		var err error
+		respBody, err = ResolveTemplateBody(respBody, r, s.strictTemplating)
+		if err != nil {
+			w.Header().Set("X-Httptape-Error", "template")
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		respHeaders, err = ResolveTemplateHeaders(respHeaders, r, s.strictTemplating)
+		if err != nil {
+			w.Header().Set("X-Httptape-Error", "template")
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	// 9. Write the matched tape's response.
+	// 9a: copy response headers (clone slices to prevent aliasing with tape data).
+	for key, values := range respHeaders {
 		w.Header()[key] = append([]string(nil), values...)
 	}
-	// 8b: apply replay header overrides (if any).
+	// 9b: apply replay header overrides (if any).
 	for key, value := range s.replayHeaders {
 		w.Header().Set(key, value)
 	}
-	// 8c: remove Content-Length — the recorded value may be stale if the body
-	// was modified by sanitization. Let net/http set it from the actual body.
+	// 9c: remove Content-Length — the recorded value may be stale if the body
+	// was modified by sanitization or templating. Let net/http set it from the actual body.
 	w.Header().Del("Content-Length")
-	// 8d: write status code.
+	// 9d: write status code.
 	w.WriteHeader(tape.Response.StatusCode)
-	// 8e: write body.
-	w.Write(tape.Response.Body) //nolint:errcheck // response write failure is not actionable
+	// 9e: write body.
+	w.Write(respBody) //nolint:errcheck // response write failure is not actionable
 }
