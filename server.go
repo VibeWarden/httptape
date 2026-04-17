@@ -26,6 +26,7 @@ type Server struct {
 	replayHeaders    map[string]string   // headers injected into every replayed response
 	templating       bool                // if true, resolve {{request.*}} in responses
 	strictTemplating bool                // if true, unresolvable expressions produce 500
+	sseTiming        SSETimingMode       // controls SSE replay inter-event timing
 }
 
 // ServerOption configures a Server.
@@ -111,6 +112,17 @@ func WithReplayHeaders(key, value string) ServerOption {
 	}
 }
 
+// WithSSETiming sets the inter-event timing mode for SSE tape replay.
+// Defaults to SSETimingRealtime (replay with original inter-event gaps).
+//
+// Modes:
+//   - SSETimingRealtime(): replay with original timing
+//   - SSETimingAccelerated(factor): divide gaps by factor (must be > 0)
+//   - SSETimingInstant(): emit all events immediately, no delay
+func WithSSETiming(mode SSETimingMode) ServerOption {
+	return func(s *Server) { s.sseTiming = mode }
+}
+
 // WithTemplating controls whether Mustache-style {{request.*}} template
 // expressions in response bodies and headers are resolved against the
 // incoming request at serve time. When enabled, template expressions are
@@ -123,7 +135,8 @@ func WithReplayHeaders(key, value string) ServerOption {
 // only replay recorded traffic (no {{ in fixtures) see zero behavioral
 // change, as the fast path skips processing for bodies without "{{".
 //
-// See also WithStrictTemplating for error handling of unresolvable
+// SSE responses skip templating — events are streamed verbatim from the
+// tape. See also WithStrictTemplating for error handling of unresolvable
 // expressions.
 func WithTemplating(enabled bool) ServerOption {
 	return func(s *Server) { s.templating = enabled }
@@ -178,6 +191,7 @@ func NewServer(store Store, opts ...ServerOption) *Server {
 		fallbackStatus: http.StatusNotFound,
 		fallbackBody:   []byte("httptape: no matching tape found"),
 		templating:     true,
+		sseTiming:      SSETimingRealtime(),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -298,7 +312,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 8. Templating -- resolve {{request.*}} expressions in response body and headers.
+	// 8. Check if this is an SSE tape — SSE responses stream events verbatim
+	// (no templating, no replay-header injection on the body path).
+	if tape.Response.IsSSE() {
+		s.serveSSE(w, r, tape)
+		return
+	}
+
+	// 9. Templating — resolve {{request.*}} expressions in non-SSE response
+	// body and headers.
 	respBody := tape.Response.Body
 	respHeaders := tape.Response.Headers
 	if s.templating {
@@ -317,8 +339,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 9. Write the matched tape's response.
-	// 9a: copy response headers (clone slices to prevent aliasing with tape data).
+	// 10. Write the matched tape's response.
+	// 10a: copy response headers (clone slices to prevent aliasing with tape data).
 	for key, values := range respHeaders {
 		w.Header()[key] = append([]string(nil), values...)
 	}
@@ -326,11 +348,46 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	for key, value := range s.replayHeaders {
 		w.Header().Set(key, value)
 	}
-	// 9c: remove Content-Length — the recorded value may be stale if the body
+	// 10c: remove Content-Length — the recorded value may be stale if the body
 	// was modified by sanitization or templating. Let net/http set it from the actual body.
 	w.Header().Del("Content-Length")
-	// 9d: write status code.
+	// 10d: write status code.
 	w.WriteHeader(tape.Response.StatusCode)
-	// 9e: write body.
+	// 10e: write body.
 	w.Write(respBody) //nolint:errcheck // response write failure is not actionable
+}
+
+// serveSSE handles SSE tape replay. It writes response headers, then
+// streams events using the configured SSETimingMode.
+func (s *Server) serveSSE(w http.ResponseWriter, r *http.Request, tape Tape) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "httptape: streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	// Copy tape response headers.
+	for key, values := range tape.Response.Headers {
+		w.Header()[key] = append([]string(nil), values...)
+	}
+
+	// Ensure SSE-required headers are set.
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	// Apply replay header overrides (if any).
+	for key, value := range s.replayHeaders {
+		w.Header().Set(key, value)
+	}
+
+	// Remove Content-Length — SSE streams are chunked.
+	w.Header().Del("Content-Length")
+
+	// Write status code.
+	w.WriteHeader(tape.Response.StatusCode)
+	flusher.Flush()
+
+	// Replay events with the configured timing.
+	_ = replaySSEEvents(r.Context(), w, flusher, tape.Response.SSEEvents, s.sseTiming) //nolint:errcheck // SSE replay write failure is not actionable
 }
