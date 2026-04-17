@@ -382,6 +382,78 @@
 }
 .product-card button:hover { opacity: 0.85; }
 
+/* === Assistant section === */
+.assistant {
+  margin-top: 1.5rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--border);
+}
+
+.assistant-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.85rem;
+}
+
+.assistant-query-btn {
+  background: var(--accent-bg);
+  color: var(--accent);
+  border: 1px solid var(--accent-border);
+  padding: 0.4rem 0.85rem;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.75rem;
+  font-weight: 500;
+  transition: all 0.15s ease;
+}
+.assistant-query-btn:hover:not(:disabled) {
+  background: var(--accent);
+  color: #fff;
+}
+.assistant-query-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.assistant-output {
+  min-height: 4rem;
+  padding: 0.85rem 1rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 0.82rem;
+  line-height: 1.55;
+  color: var(--text-h);
+}
+
+.assistant-empty {
+  margin: 0;
+  color: var(--text);
+  font-style: italic;
+  font-size: 0.78rem;
+}
+
+.assistant-text {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.assistant-cursor {
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  background: var(--accent);
+  margin-left: 1px;
+  vertical-align: text-bottom;
+  animation: cursorBlink 0.8s steps(2) infinite;
+}
+
+@keyframes cursorBlink {
+  0% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
 @media (prefers-color-scheme: dark) {
   .source-live { color: #4ade80; }
   .source-l1 { color: #facc15; }
