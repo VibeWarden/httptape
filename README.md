@@ -23,6 +23,8 @@ httptape captures HTTP request/response pairs, redacts sensitive data on write,
 and replays them as a mock server. Think WireMock, but with a 3 MB Docker image,
 an embeddable Go library, and a redaction pipeline built into the core.
 
+**Docs**: [vibewarden.dev/docs/httptape](https://vibewarden.dev/docs/httptape/) · **From**: [VibeWarden](https://vibewarden.dev)
+
 **The 3 Rs:**
 
 1. **Record** -- capture real HTTP traffic via a transparent `http.RoundTripper`
@@ -88,7 +90,7 @@ httptape proxy --upstream https://api.example.com \
     --fixtures ./cache --config redact.json
 ```
 
-When the upstream is reachable, requests are forwarded and responses are cached in two tiers (L1 in-memory, L2 on disk). When the upstream is down, httptape transparently serves cached responses. See [Proxy Mode](docs/proxy.md) for details.
+When the upstream is reachable, requests are forwarded and responses are cached in two tiers (L1 in-memory, L2 on disk). When the upstream is down, httptape transparently serves cached responses. See [Proxy Mode](https://vibewarden.dev/docs/httptape/proxy/) for details.
 
 ## Install
 
@@ -325,12 +327,18 @@ More examples coming. See [`examples/README.md`](examples/README.md) for the ind
 
 ## Documentation
 
-- [Getting Started](docs/getting-started.md)
-- [Recording](docs/recording.md) · [Replay](docs/replay.md) · [Redaction](docs/sanitization.md)
-- [Proxy Mode](docs/proxy.md) · [Matching](docs/matching.md) · [Storage](docs/storage.md)
-- [Import/Export](docs/import-export.md) · [JSON Config](docs/config.md)
-- [CLI Reference](docs/cli.md) · [Docker](docs/docker.md) · [Testcontainers](docs/testcontainers.md)
-- [API Reference](docs/api-reference.md)
+Full docs at **[vibewarden.dev/docs/httptape](https://vibewarden.dev/docs/httptape/)**.
+
+- [Getting Started](https://vibewarden.dev/docs/httptape/getting-started/)
+- [Recording](https://vibewarden.dev/docs/httptape/recording/) · [Replay](https://vibewarden.dev/docs/httptape/replay/) · [Redaction](https://vibewarden.dev/docs/httptape/sanitization/)
+- [Proxy Mode](https://vibewarden.dev/docs/httptape/proxy/) · [Matching](https://vibewarden.dev/docs/httptape/matching/) · [Storage](https://vibewarden.dev/docs/httptape/storage/)
+- [Import/Export](https://vibewarden.dev/docs/httptape/import-export/) · [JSON Config](https://vibewarden.dev/docs/httptape/config/)
+- [CLI Reference](https://vibewarden.dev/docs/httptape/cli/) · [Docker](https://vibewarden.dev/docs/httptape/docker/) · [Testcontainers](https://vibewarden.dev/docs/httptape/testcontainers/)
+- [API Reference](https://vibewarden.dev/docs/httptape/api-reference/)
+
+## About
+
+httptape is developed as part of [VibeWarden](https://vibewarden.dev). For the full docs, guides, and other projects from the VibeWarden team, visit [vibewarden.dev](https://vibewarden.dev).
 
 ## License
 
