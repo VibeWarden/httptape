@@ -56,6 +56,18 @@ cd examples/java-spring-boot
 
 Tests spin up httptape containers via Testcontainers, run assertions, and tear down. No API keys. No real LLM calls. Deterministic on every run.
 
+## Development workflow -- run with Testcontainers
+
+For local development and manual testing, use the test-time runner. It boots the app with the same Testcontainers setup the integration tests use -- you get a working app at `http://localhost:8080` with httptape serving fixtures, no separate `docker compose up` needed.
+
+```bash
+./mvnw spring-boot:test-run
+```
+
+Or in IntelliJ: right-click `TestApplication.main()` -> Run/Debug. Set breakpoints in `RecommendationService` / `UserService` and step through the streaming + REST flows interactively.
+
+The app starts with a real httptape container in the background. Exit the app to tear down the container.
+
 ## Try it standalone
 
 ```bash
@@ -108,6 +120,8 @@ java-spring-boot/
     test/java/dev/httptape/demo/
       RecommendationServiceIntegrationTest.java  # 2 tests: content + cadence
       UserServiceIntegrationTest.java            # 3 tests: happy, list, 404
+      TestApplication.java               # Dev runner (spring-boot:test-run)
+      TestcontainersConfig.java          # Shared Testcontainers config for dev runner
     test/resources/fixtures/
       openai/
         chat-completion-headphones.json  # SSE fixture (OpenAI wire format)
