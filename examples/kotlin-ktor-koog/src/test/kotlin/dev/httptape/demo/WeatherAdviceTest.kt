@@ -25,37 +25,31 @@ import io.ktor.server.testing.*
  */
 class WeatherAdviceTest : FreeSpec({
 
-    "weather-advice endpoint" - {
-        "with a Koog agent backed by httptape" - {
-            "when the user asks about Berlin" - {
-                "streams the expected umbrella advice" {
-                    val httptapeBaseUrl = HttptapeContainer.baseUrl
+    "advises bringing an umbrella when it is rainy in the requested city" {
+        val httptapeBaseUrl = HttptapeContainer.baseUrl
 
-                    testApplication {
-                        application {
-                            configureApp(
-                                openAiBaseUrl = httptapeBaseUrl,
-                                openAiApiKey = "sk-test-key",
-                                weatherBaseUrl = httptapeBaseUrl
-                            )
-                        }
+        testApplication {
+            application {
+                configureApp(
+                    openAiBaseUrl = httptapeBaseUrl,
+                    openAiApiKey = "sk-test-key",
+                    weatherBaseUrl = httptapeBaseUrl
+                )
+            }
 
-                        val client = createClient {
-                            install(SSE)
-                        }
+            val client = createClient {
+                install(SSE)
+            }
 
-                        val events = mutableListOf<String>()
-                        client.sse("/weather-advice?city=Berlin") {
-                            incoming.collect { event ->
-                                event.data?.let { events.add(it) }
-                            }
-                        }
-
-                        val fullResponse = events.joinToString("")
-                        fullResponse shouldContain "umbrella"
-                    }
+            val events = mutableListOf<String>()
+            client.sse("/weather-advice?city=Berlin") {
+                incoming.collect { event ->
+                    event.data?.let { events.add(it) }
                 }
             }
+
+            val fullResponse = events.joinToString("")
+            fullResponse shouldContain "umbrella"
         }
     }
 })
