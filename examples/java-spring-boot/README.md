@@ -1,167 +1,100 @@
 # Test your Spring AI agents deterministically
 
-Working example of [httptape](https://github.com/VibeWarden/httptape) used to test a **Spring AI streaming chat completion** and a classic REST integration -- both served from pre-recorded fixtures via [Testcontainers](https://testcontainers.com/), with zero real API calls.
+Working example of [httptape](https://github.com/VibeWarden/httptape) used to test a **Spring AI streaming chat completion** and a classic REST integration — both served from pre-recorded fixtures via [Testcontainers](https://testcontainers.com/), with zero real API calls.
 
-## Architecture
+## What this demo shows
 
-```
-                     +-- Spring AI ChatClient --+
-                     |                          |
-RecommendationService -----> httptape (SSE)     |  Testcontainers
-                     |    POST /v1/chat/        |  (GenericContainer)
-                     |    completions           |
-                     |                          |
-UserService ---------+-----> httptape (REST)    |
-                          GET /users/{id}       |
-                          GET /users            |
-                     +--------------------------+
-```
+A real Spring Boot service that integrates with two external APIs — an LLM (via Spring AI's `ChatClient`) and a generic REST API — tested end-to-end with **deterministic fixtures** instead of real network calls.
 
-One shared httptape container across all test classes (via `TestcontainersConfig`):
+The story: **one tool, one test approach, both integration shapes.** The same pattern that makes flaky-API REST tests deterministic also makes flaky-AI streaming tests deterministic, on the same stack, with no extra mocking framework.
 
-| Test class | Fixtures used | What it proves |
-|---|---|---|
-| `RecommendationServiceIntegrationTest` | `fixtures/openai/` | Spring AI streaming chat completions replayed from an SSE fixture in OpenAI's exact wire format |
-| `UserServiceIntegrationTest` | `fixtures/users/` | Classic REST `GET` requests replayed from JSON fixtures |
+### Headline scenario — Spring AI streaming
 
-## How it works
+The service calls an LLM via OpenAI's chat completions API. Tests serve a hand-crafted SSE fixture in OpenAI's exact wire format (each `data:` event is a real `chat.completion.chunk` JSON, ending with `[DONE]`). Spring AI's auto-configuration deserializes the stream as it would a real call.
 
-### Headline: deterministic LLM streaming tests
+### Secondary scenario — classic REST
 
-The `RecommendationService` uses Spring AI's `ChatClient` to call an LLM via the OpenAI chat completions API. In tests, `@Import(TestcontainersConfig.class)` brings in a shared httptape container that overrides `spring.ai.openai.base-url` via a `DynamicPropertyRegistrar` bean. httptape serves a pre-recorded SSE fixture in OpenAI's exact wire format -- every `data:` frame is a valid `chat.completion.chunk` JSON object, ending with the `[DONE]` sentinel.
-
-Spring AI's `OpenAiApi` appends `/v1/chat/completions` to the base URL. The fixture's request URL is `/v1/chat/completions`. The `TestcontainersConfig` handles all property wiring -- Spring AI's auto-configuration reads the overridden properties and constructs everything correctly.
-
-### Secondary: classic REST integration tests
-
-The `UserService` uses Spring's `RestClient` to fetch user data from an external REST API. Same pattern: the shared `TestcontainersConfig` overrides the base URL, httptape serves recorded JSON fixtures.
-
-The story: **one tool, one test approach, both integration shapes.**
+The service also calls a regular REST endpoint via Spring's modern `RestClient`. Same Testcontainers + httptape pattern, recorded JSON fixtures.
 
 ## Prerequisites
 
-- **Docker** (for Testcontainers and `docker compose`)
-- **JDK 25** (for `./mvnw test`)
+- **Docker** (for Testcontainers and the optional `docker compose` flow)
+- **JDK 25**
 
-**Spring AI version**: this demo uses Spring AI 2.0.0-M4 (milestone) because Spring AI 1.x targets Spring Boot 3.x. We're tracking the upcoming Spring AI 2.0.0 GA -- bump to GA when available.
+> **Spring AI version note**: the demo uses Spring AI 2.0.0-M4 (milestone) because Spring AI 1.x targets Spring Boot 3.x. Bump to 2.0.0 GA when it ships.
 
 ## Quick start
 
 ```bash
 cd examples/java-spring-boot
-
-# Run all integration tests (2 AI streaming + 3 REST)
 ./mvnw test
 ```
 
-Tests spin up httptape containers via Testcontainers, run assertions, and tear down. No API keys. No real LLM calls. Deterministic on every run.
+Tests spin up an httptape container via Testcontainers, run assertions against both integration scenarios, and tear down. No API keys. No real LLM calls. Deterministic on every run.
 
-## Development workflow -- run with Testcontainers
+## Adding a new fixture
 
-For local development and manual testing, use the test-time runner. It boots the app with the same Testcontainers setup the integration tests use -- you get a working app at `http://localhost:8080` with httptape serving fixtures, no separate `docker compose up` needed.
+Drop a JSON file anywhere under `src/test/resources/fixtures/` — the test container auto-discovers it via classpath scan. No code changes needed.
+
+The httptape Tape JSON schema (and how to record real upstream traffic into one) is documented at [vibewarden.dev/docs/httptape](https://vibewarden.dev/docs/httptape/).
+
+## Development workflow — run with the same Testcontainers setup
+
+For local debugging or manual `curl`-ing, boot the app with the same Testcontainers wiring the integration tests use:
 
 ```bash
 ./mvnw spring-boot:test-run
 ```
 
-Or in IntelliJ: right-click `TestApplication.main()` -> Run/Debug. Set breakpoints in `RecommendationService` / `UserService` and step through the streaming + REST flows interactively.
-
-The app starts with a real httptape container in the background. Exit the app to tear down the container.
+In IntelliJ: right-click the test-time runner class → Run/Debug. Set breakpoints, step through the streaming + REST flows interactively, no separate `docker compose up` needed.
 
 ## Faster local tests with Testcontainers reuse
 
-Testcontainers can keep containers running between `./mvnw test` invocations on your local machine, dramatically speeding up the test cycle. This is opt-in per developer (CI must NOT enable it -- containers should always be ephemeral on CI):
+Opt-in per developer (CI must NOT enable it — containers should always be ephemeral on CI):
 
 ```bash
 echo "testcontainers.reuse.enable=true" >> ~/.testcontainers.properties
 ```
 
-One-time setup. Subsequent test runs reuse the same httptape container, dropping startup overhead from ~2s to near-zero per run. Combined with the shared `TestcontainersConfig` (one container per JVM, not per test class), the integration test cycle stays snappy even as more test classes are added.
+One-time setup. Subsequent test runs reuse the same httptape container, dropping startup overhead from ~2s to near-zero. Combined with the shared single-container test config, the cycle stays snappy as more test classes are added.
 
-Why per-developer and not project-shipped? Testcontainers deliberately requires `reuse.enable` to live in `~/.testcontainers.properties` (not the classpath) -- it's a local-dev convenience that would be unsafe in CI, where every build must start clean.
+Why per-developer and not project-shipped? Testcontainers deliberately requires `reuse.enable` to live in `~/.testcontainers.properties` (not the classpath) — it's a local-dev convenience that would be unsafe in CI.
 
 ## A note on virtual threads
 
-The app enables Java 21+ **virtual threads** via `spring.threads.virtual.enabled=true` (Spring Boot 3.2+ config). Tomcat uses a virtual-thread executor — each in-flight HTTP request occupies a virtual thread (JVM-managed, essentially free) instead of an OS thread from the bounded pool.
+The app enables Java 21+ **virtual threads** via `spring.threads.virtual.enabled=true`. Tomcat's request executor switches to virtual threads — each in-flight HTTP request occupies a virtual thread (JVM-managed, essentially free) instead of an OS thread from a bounded pool.
 
-That makes the `.block()` call in `RecommendationService.recommend()` idiomatic: parking a virtual thread to wait for the LLM stream to complete is the same primitive as subscribing to a Reactor `Mono` — no thread-pool starvation concerns even under heavy concurrent load. Imperative code, reactive scaling.
+Effect: blocking calls like `.block()` on a Reactor `Mono` (used to collect the LLM stream into a string) are idiomatic. Parking a virtual thread is the same primitive as subscribing to a Reactor `Mono` — no thread-pool starvation under heavy concurrent load. Imperative code, reactive scaling.
 
-This is the canonical Spring Boot 4 + Java 25 best practice for blocking-style code in 2026.
+This is the canonical Spring Boot 4 + Java 25 best practice for blocking-style code.
 
 ## Try it standalone
 
+For non-Java users who want to `curl` the demo without running tests:
+
 ```bash
 docker compose up -d
-
-# Classic REST -- returns user JSON from fixture
 curl http://localhost:8080/users/1
-
-# AI streaming -- streams SSE events in real time
 curl -N http://localhost:8080/recommendations?for=headphones
-
 docker compose down
 ```
 
-## How to record real OpenAI streams to fixtures
+## Stack
 
-If you want to record from the real OpenAI API instead of hand-authoring fixtures:
-
-```bash
-# 1. Record a real streaming call via httptape proxy
-httptape record \
-  --upstream https://api.openai.com \
-  --fixtures ./src/test/resources/fixtures/openai \
-  --config ./mocks/sanitize.json
-
-# 2. In another terminal, make the call through the proxy
-curl http://localhost:8081/v1/chat/completions \
-  -H "Authorization: Bearer $OPENAI_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"gpt-4o-mini","stream":true,"messages":[{"role":"user","content":"Recommend headphones"}]}'
-
-# 3. httptape writes the fixture with PII redacted on write.
-#    Commit the fixture. Tests replay it deterministically forever.
-```
-
-## Project layout
-
-```
-java-spring-boot/
-  src/
-    main/java/dev/httptape/demo/
-      Application.java                 # @SpringBootApplication
-      AppConfig.java                   # Explicit @Bean wiring for all services
-      RecommendationService.java       # Spring AI ChatClient (streaming)
-      UserService.java                 # Spring RestClient (blocking)
-      User.java                        # record type
-      DemoController.java              # REST + SSE endpoints
-    main/resources/
-      application.properties           # base URL configs
-    test/java/dev/httptape/demo/
-      RecommendationServiceIntegrationTest.java  # 2 tests: content + cadence
-      UserServiceIntegrationTest.java            # 3 tests: happy, list, 404
-      TestApplication.java               # Dev runner (spring-boot:test-run)
-      TestcontainersConfig.java          # Shared Testcontainers config (tests + dev runner)
-    test/resources/fixtures/
-      openai/
-        chat-completion-headphones.json  # SSE fixture (OpenAI wire format)
-      users/
-        get-user-1.json                  # REST fixture
-        get-users.json                   # REST fixture
-        get-user-999.json                # 404 fixture
-  mocks/
-    sanitize.json                        # typed-Faker config (illustrative)
-  pom.xml                               # Spring Boot 4.0.5, Spring AI 2.0.0-M4 (BOM-based)
-  Dockerfile                            # multi-stage Maven -> JRE 25
-  docker-compose.yml                    # httptape + app
-  mvnw, mvnw.cmd, .mvn/                 # Maven Wrapper (no host Maven needed)
-```
+| | |
+|---|---|
+| Java | 25 (LTS), virtual threads enabled |
+| Spring Boot | 4.0.5, BOM-based dependency management (no `spring-boot-starter-parent`) |
+| Spring AI | 2.0.0-M4 (OpenAI client, milestone) |
+| HTTP client | Spring's modern blocking `RestClient` |
+| Tests | JUnit 5 + Testcontainers (single shared container) |
+| Build | Maven Wrapper committed |
 
 ## Why not...?
 
 | Alternative | Limitation |
 |---|---|
-| **WireMock** | No native SSE record/replay. No sanitize-on-write. Java-heavy setup for what should be a fixture file. |
-| **Spring MockRestServiceServer** | Works for REST, but does not support streaming SSE responses from Spring AI. |
-| **Real OpenAI calls in tests** | Slow (network round-trip), flaky (rate limits, outages), costs money, and leaks PII into CI logs. |
-| **Manual mocking (Mockito)** | Skips the entire HTTP layer -- you are not testing the real integration. Breaks when the API contract changes. |
+| **WireMock** | No native SSE record/replay. No sanitize-on-write. |
+| **Spring `MockRestServiceServer`** | Works for REST, no streaming SSE support for Spring AI. |
+| **Real OpenAI calls in tests** | Slow (network), flaky (rate limits / outages), costs money, leaks PII into CI logs. |
+| **Manual mocking (Mockito)** | Skips the HTTP layer — you're not testing the real integration. Breaks when the API contract changes. |

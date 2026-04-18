@@ -1,7 +1,13 @@
 package dev.httptape.demo;
 
+import java.io.IOException;
+import java.util.HashMap;
+import java.util.Map;
+
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
 import org.springframework.test.context.DynamicPropertyRegistrar;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.wait.strategy.Wait;
@@ -11,44 +17,63 @@ import org.testcontainers.utility.MountableFile;
  * Shared Testcontainers configuration for the dev runner ({@link TestApplication})
  * and all integration tests.
  *
- * <p>Strategy: a single httptape container with all fixtures (OpenAI + users)
- * copied into one flat {@code /fixtures} directory. Both the Spring AI ChatClient
- * and the REST UserService point at the same container. This keeps startup fast
- * and simple -- one container per JVM, not per test class.
+ * <p>Strategy: a single httptape container serving fixtures auto-discovered
+ * from the classpath. All {@code .json} files under
+ * {@code src/test/resources/fixtures/**} are copied into the container's
+ * flat {@code /fixtures} directory at bean-construction time. Drop a new
+ * fixture in the resources tree and it is picked up automatically -- no
+ * code changes required.
+ *
+ * <p>One container per JVM (not per test class). Both the Spring AI ChatClient
+ * and the REST UserService point at the same container.
  *
  * <p>Integration tests import this configuration via
- * {@code @Import(TestcontainersConfig.class)}. The container is started once and
- * shared across all test classes within the same Spring application context.
+ * {@code @Import(TestcontainersConfig.class)}.
  */
 @TestConfiguration(proxyBeanMethods = false)
 class TestcontainersConfig {
 
     /**
-     * A single httptape container serving all fixtures (OpenAI SSE + REST users)
-     * with realtime SSE timing for a realistic streaming experience.
+     * A single httptape container serving every {@code .json} fixture found
+     * on the classpath under {@code fixtures/**}. Realtime SSE timing for a
+     * realistic streaming experience.
      */
     @Bean
-    GenericContainer<?> httptapeContainer() {
-        return new GenericContainer<>("ghcr.io/vibewarden/httptape:0.10.1")
+    GenericContainer<?> httptapeContainer() throws IOException {
+        GenericContainer<?> container = new GenericContainer<>("ghcr.io/vibewarden/httptape:0.10.1")
                 .withCommand("serve", "--fixtures", "/fixtures", "--sse-timing=realtime")
                 .withExposedPorts(8081)
-                .withCopyFileToContainer(
-                        MountableFile.forClasspathResource("fixtures/openai/chat-completion-headphones.json"),
-                        "/fixtures/chat-completion-headphones.json"
-                )
-                .withCopyFileToContainer(
-                        MountableFile.forClasspathResource("fixtures/users/get-user-1.json"),
-                        "/fixtures/get-user-1.json"
-                )
-                .withCopyFileToContainer(
-                        MountableFile.forClasspathResource("fixtures/users/get-users.json"),
-                        "/fixtures/get-users.json"
-                )
-                .withCopyFileToContainer(
-                        MountableFile.forClasspathResource("fixtures/users/get-user-999.json"),
-                        "/fixtures/get-user-999.json"
-                )
                 .waitingFor(Wait.forHttp("/").forStatusCode(404));
+
+        // Auto-discover all fixtures under classpath:fixtures/**/*.json and
+        // mount each into the container's flat /fixtures dir. Httptape's
+        // FileStore is flat (no recursive subdirectory scanning), so we
+        // collapse subdirs (openai/, users/, ...) into one container-side dir.
+        // Filename collisions across subdirs would be ambiguous -- detect and
+        // fail fast at config time rather than silently overwriting.
+        PathMatchingResourcePatternResolver resolver = new PathMatchingResourcePatternResolver();
+        Resource[] fixtures = resolver.getResources("classpath:fixtures/**/*.json");
+        Map<String, String> seen = new HashMap<>();
+        for (Resource fixture : fixtures) {
+            String filename = fixture.getFilename();
+            if (filename == null || filename.isBlank()) {
+                continue;
+            }
+            String previousPath = seen.put(filename, fixture.getURI().toString());
+            if (previousPath != null) {
+                throw new IllegalStateException(
+                        "Fixture filename collision in flat /fixtures mount: '" + filename
+                                + "' appears in both '" + previousPath
+                                + "' and '" + fixture.getURI() + "'. "
+                                + "Rename one (e.g., add a subject prefix) so filenames are unique across all subdirs."
+                );
+            }
+            container.withCopyFileToContainer(
+                    MountableFile.forHostPath(fixture.getFile().toPath()),
+                    "/fixtures/" + filename
+            );
+        }
+        return container;
     }
 
     /**
