@@ -12284,3 +12284,39 @@ Dispatch plan: #178 and #179 can be architected in parallel. #180 waits for #179
 **Key design pivot from original #187:** the original spec used escaped JSON strings for JSON bodies (e.g., `"body": "{\"model\":\"gpt-4o-mini\",...}"`). The revised spec uses **native JSON objects** (e.g., `"body": {"model": "gpt-4o-mini", ...}`), making the `body` field truly polymorphic: its JSON type (object, string, or base64 string) is determined by the Content-Type header. This is a more ambitious but significantly better DX outcome.
 
 **No open questions from the PM.** All 8 open questions are flagged for the architect.
+
+### 2026-04-18 — Feature-parity audit: four post-launch gaps filed to Future milestone
+
+**Trigger:** Feature-parity audit against general-purpose HTTP mocking tools identified four gaps that would meaningfully improve httptape's test-utility value. All four are post-launch work — not blocking any current milestone. Filed to the tracker so they don't get lost.
+
+**Shared framing:** Each issue is framed as "here's the gap + here's our design" — no competing products are referenced by name. Where relevant, the LLM agent multi-turn testing angle is called out as the primary motivation, since that is httptape's current marketing wedge.
+
+**Issues created:**
+
+1. **#194** — `feat: request journal + admin HTTP endpoint for post-hoc verification`
+   - Labels: `type:feature`, `priority:high`, `milestone:future`. Milestone: Future.
+   - In-memory bounded ring buffer on `Server` recording every inbound request. Go API (`Journal()`, `ClearJournal()`, `JournalLen()`) plus opt-in HTTP admin endpoints under `/__httptape/` prefix with filtering (method, path, body-contains, since, limit). Gated by `WithAdminAPI() ServerOption` / `--admin-api` CLI flag.
+   - Key open questions for architect: full body vs hash in journal entries, concurrency model, unmatched request inclusion.
+   - No dependencies.
+
+2. **#195** — `feat(matcher): scenarios for stateful multi-step interactions (sequence + state machine)`
+   - Labels: `type:feature`, `priority:high`, `milestone:future`. Milestone: Future.
+   - Two tiers: declarative linear sequences (80% case) and full state machine transitions (power case). New `ScenarioCriterion` implementing `Criterion`. Per-scenario state tracked on `Server`, thread-safe. Config validation ensures tape IDs exist and transitions form valid graphs.
+   - Key open questions for architect: terminal behavior (sticky vs loop), cross-scenario reset semantics.
+   - Soft dependency on #194 (admin endpoints for scenario reset/inspect), but can ship independently.
+
+3. **#196** — `feat(templating): response template helpers with deterministic faker integration`
+   - Labels: `type:feature`, `priority:medium`, `milestone:future`. Milestone: Future.
+   - Extends `{{...}}` parser with `now`, `uuid`, `randomHex`, `randomInt`, `counter`, and `faker.*` helpers. The `faker.*` helpers bridge to the existing HMAC-based Faker infrastructure — same seed produces the same output across runs. This is the differentiator: reproducible fakes baked into templating.
+   - Key open questions for architect: parser strategy (ad-hoc extension vs proper tokenizer), seedless faker fallback policy, counter overflow behavior.
+   - No hard dependencies; integrates nicely with #194 for counter reset.
+
+4. **#197** — `feat(server): inbound TLS listener (self-signed cert or user-provided)`
+   - Labels: `type:feature`, `priority:medium`, `milestone:future`. Milestone: Future.
+   - User-provided cert/key or auto-generated self-signed cert at startup (stdlib crypto only). Logs fingerprint and PEM for programmatic trust/pinning. Relevant for LLM SDK clients that hardcode HTTPS.
+   - Key open questions for architect: cert expiry, port behavior (switch to 8443 vs dual-listen), key algorithm.
+   - No dependencies.
+
+**Priority rationale:** #194 and #195 are high priority because they directly unlock the multi-turn agent testing narrative (verify what the agent sent; serve stateful response sequences). #196 and #197 are medium priority — useful but not blocking the core value proposition.
+
+**All four issues:** `READY_FOR_ARCH` status comments posted. Architects not dispatched — returned to user for triage.
