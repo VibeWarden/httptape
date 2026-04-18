@@ -1,0 +1,20 @@
+# Maven build output
+target/
+
+# httptape cache (generated at runtime)
+.httptape-cache/
+
+# IDE files
+.idea/
+*.iml
+.vscode/
+.settings/
+.classpath
+.project
+.factorypath
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
