@@ -1,7 +1,6 @@
-package dev.httptape.demo;
+package dev.vibewarden.httptape.demo;
 
 import org.springframework.ai.chat.client.ChatClient;
-import org.springframework.stereotype.Service;
 
 import reactor.core.publisher.Flux;
 
@@ -12,8 +11,9 @@ import reactor.core.publisher.Flux;
  * <p>In production, the ChatClient talks to OpenAI's streaming chat completions
  * endpoint. In tests, httptape serves pre-recorded SSE fixtures in the exact
  * OpenAI wire format, making tests deterministic and cost-free.
+ *
+ * <p>Registered as a bean via {@link AppConfig} rather than stereotype annotations.
  */
-@Service
 public class RecommendationService {
 
     private final ChatClient chatClient;

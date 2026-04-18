@@ -1,4 +1,4 @@
-package dev.httptape.demo;
+package dev.vibewarden.httptape.demo;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;

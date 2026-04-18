@@ -41,7 +41,7 @@ The story: **one tool, one test approach, both integration shapes.**
 ## Prerequisites
 
 - **Docker** (for Testcontainers and `docker compose`)
-- **JDK 21** (for `./mvnw test`)
+- **JDK 25** (for `./mvnw test`)
 
 ## Quick start
 
@@ -94,16 +94,16 @@ curl http://localhost:8081/v1/chat/completions \
 ```
 java-spring-boot/
   src/
-    main/java/dev/httptape/demo/
+    main/java/dev/vibewarden/httptape/demo/
       Application.java                 # @SpringBootApplication
+      AppConfig.java                   # Explicit @Bean wiring for all services
       RecommendationService.java       # Spring AI ChatClient (streaming)
       UserService.java                 # Spring RestClient (blocking)
       User.java                        # record type
-      RestClientConfig.java            # RestClient.Builder bean
       DemoController.java              # REST + SSE endpoints
     main/resources/
       application.properties           # base URL configs
-    test/java/dev/httptape/demo/
+    test/java/dev/vibewarden/httptape/demo/
       RecommendationServiceIntegrationTest.java  # 2 tests: content + cadence
       UserServiceIntegrationTest.java            # 3 tests: happy, list, 404
     test/resources/fixtures/
@@ -115,8 +115,8 @@ java-spring-boot/
         get-user-999.json                # 404 fixture
   mocks/
     sanitize.json                        # typed-Faker config (illustrative)
-  pom.xml                               # Spring Boot 3.4.5, Spring AI 1.0.0
-  Dockerfile                            # multi-stage Maven -> JRE 21
+  pom.xml                               # Spring Boot 3.5.3, Spring AI 1.0.0 (BOM-based)
+  Dockerfile                            # multi-stage Maven -> JRE 25
   docker-compose.yml                    # httptape + app
   mvnw, mvnw.cmd, .mvn/                 # Maven Wrapper (no host Maven needed)
 ```

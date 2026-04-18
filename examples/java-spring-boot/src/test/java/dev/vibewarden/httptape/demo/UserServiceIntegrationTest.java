@@ -1,4 +1,4 @@
-package dev.httptape.demo;
+package dev.vibewarden.httptape.demo;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;

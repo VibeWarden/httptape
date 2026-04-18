@@ -1,7 +1,6 @@
-package dev.httptape.demo;
+package dev.vibewarden.httptape.demo;
 
 import org.springframework.http.HttpStatus;
-import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClient;
 
 import java.util.List;
@@ -12,8 +11,9 @@ import java.util.Optional;
  *
  * <p>In production the base URL points at the real API; in tests it points at
  * an httptape container that replays recorded fixtures.
+ *
+ * <p>Registered as a bean via {@link AppConfig} rather than stereotype annotations.
  */
-@Service
 public class UserService {
 
     private final RestClient restClient;

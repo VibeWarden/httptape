@@ -61,7 +61,7 @@ jobs:
 
           - name: java-spring-boot
             path: examples/java-spring-boot
-            java-version: "21"
+            java-version: "25"
             build-command: ./mvnw -B test
     defaults:
       run:

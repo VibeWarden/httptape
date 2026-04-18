@@ -4,14 +4,9 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <parent>
-        <groupId>org.springframework.boot</groupId>
-        <artifactId>spring-boot-starter-parent</artifactId>
-        <version>3.4.5</version>
-        <relativePath/>
-    </parent>
+    <!-- BOM-based dependency management (no <parent> inheritance from spring-boot-starter-parent) -->
 
-    <groupId>dev.httptape</groupId>
+    <groupId>dev.vibewarden.httptape</groupId>
     <artifactId>java-spring-boot-demo</artifactId>
     <version>0.0.1-SNAPSHOT</version>
     <name>httptape Java + Spring Boot Demo</name>
@@ -21,13 +16,26 @@
     </description>
 
     <properties>
-        <java.version>21</java.version>
+        <maven.compiler.release>25</maven.compiler.release>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+        <spring-boot.version>3.5.3</spring-boot.version>
+        <!-- TODO: Spring Boot 4.0.x does not yet exist on Maven Central (as of 2026-04-16).
+             The reviewer's request to bump to 4.0.5 cannot be fulfilled yet.
+             Holding at Spring Boot 3.5.3 (latest 3.x GA). Revisit when Spring Boot 4 ships. -->
         <spring-ai.version>1.0.0</spring-ai.version>
         <testcontainers.version>1.20.6</testcontainers.version>
     </properties>
 
     <dependencyManagement>
         <dependencies>
+            <dependency>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-dependencies</artifactId>
+                <version>${spring-boot.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
             <dependency>
                 <groupId>org.springframework.ai</groupId>
                 <artifactId>spring-ai-bom</artifactId>
@@ -79,8 +87,24 @@
     <build>
         <plugins>
             <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.14.0</version>
+                <configuration>
+                    <parameters>true</parameters>
+                </configuration>
+            </plugin>
+            <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
+                <version>${spring-boot.version}</version>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>repackage</goal>
+                        </goals>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>
