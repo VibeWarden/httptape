@@ -1,28 +1,15 @@
 package httptape
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
-	"mime"
 	"net/http"
-	"strings"
 	"time"
-)
-
-// BodyEncoding indicates how the body was encoded for storage.
-// "identity" means UTF-8 text stored as-is by JSON marshaling.
-// "base64" means binary content (Go's encoding/json handles this
-// transparently for []byte fields).
-type BodyEncoding string
-
-const (
-	// BodyEncodingIdentity indicates the body is UTF-8 text.
-	BodyEncodingIdentity BodyEncoding = "identity"
-	// BodyEncodingBase64 indicates the body is binary, base64-encoded by
-	// Go's encoding/json marshaler.
-	BodyEncodingBase64 BodyEncoding = "base64"
 )
 
 // Tape represents a single recorded HTTP interaction (request + response pair).
@@ -51,6 +38,13 @@ type Tape struct {
 }
 
 // RecordedReq captures the essential parts of an HTTP request for matching and replay.
+//
+// The Body field is always stored as []byte in Go. When marshaled to JSON,
+// the body representation depends on the Content-Type header:
+//   - JSON Content-Type (application/json, +json suffix): native JSON object/array
+//   - Text Content-Type (text/*, application/xml, etc.): JSON string
+//   - Binary or missing Content-Type: base64-encoded JSON string
+//   - Nil or empty body: JSON null
 type RecordedReq struct {
 	// Method is the HTTP method (GET, POST, etc.).
 	Method string `json:"method"`
@@ -63,15 +57,11 @@ type RecordedReq struct {
 	Headers http.Header `json:"headers"`
 
 	// Body is the full request body bytes. May be nil for bodiless requests.
-	Body []byte `json:"body"`
+	Body []byte `json:"-"`
 
 	// BodyHash is a hex-encoded SHA-256 hash of the original request body.
 	// Used for matching without comparing full bodies.
 	BodyHash string `json:"body_hash"`
-
-	// BodyEncoding describes how the body is encoded in the JSON fixture.
-	// Set automatically by the Recorder based on Content-Type detection.
-	BodyEncoding BodyEncoding `json:"body_encoding,omitempty"`
 
 	// Truncated is true if the body was truncated due to exceeding the
 	// configured maximum body size.
@@ -84,9 +74,11 @@ type RecordedReq struct {
 
 // RecordedResp captures the essential parts of an HTTP response for replay.
 //
-// For SSE (text/event-stream) responses, the discrete events are stored in
-// SSEEvents and Body is nil. The two fields are mutually exclusive by
-// construction: the Recorder populates one or the other, never both.
+// The Body field is always stored as []byte in Go. When marshaled to JSON,
+// the body representation depends on the Content-Type header (same rules as
+// RecordedReq). For SSE (text/event-stream) responses, the discrete events
+// are stored in SSEEvents and Body is nil.
+//
 // During replay, if SSEEvents is non-nil and non-empty the tape is treated
 // as an SSE tape and Body is ignored (even if present).
 type RecordedResp struct {
@@ -97,11 +89,7 @@ type RecordedResp struct {
 	Headers http.Header `json:"headers"`
 
 	// Body is the full response body bytes.
-	Body []byte `json:"body"`
-
-	// BodyEncoding describes how the body is encoded in the JSON fixture.
-	// Set automatically by the Recorder based on Content-Type detection.
-	BodyEncoding BodyEncoding `json:"body_encoding,omitempty"`
+	Body []byte `json:"-"`
 
 	// Truncated is true if the body was truncated due to exceeding the
 	// configured maximum body size, or if an SSE stream was disconnected
@@ -126,6 +114,240 @@ func (r RecordedResp) IsSSE() bool {
 	return len(r.SSEEvents) > 0
 }
 
+// MarshalJSON implements json.Marshaler for RecordedReq.
+// The body field's JSON representation depends on the Content-Type from Headers:
+//   - JSON Content-Type: native JSON value (object/array/primitive)
+//   - Text Content-Type: JSON string (UTF-8)
+//   - Binary or missing Content-Type: base64-encoded JSON string
+//   - Nil or empty body: JSON null
+func (r RecordedReq) MarshalJSON() ([]byte, error) {
+	type alias struct {
+		Method           string      `json:"method"`
+		URL              string      `json:"url"`
+		Headers          http.Header `json:"headers"`
+		Body             any         `json:"body"`
+		BodyHash         string      `json:"body_hash"`
+		Truncated        bool        `json:"truncated,omitempty"`
+		OriginalBodySize int64       `json:"original_body_size,omitempty"`
+	}
+
+	a := alias{
+		Method:           r.Method,
+		URL:              r.URL,
+		Headers:          r.Headers,
+		Body:             nil, // default: null
+		BodyHash:         r.BodyHash,
+		Truncated:        r.Truncated,
+		OriginalBodySize: r.OriginalBodySize,
+	}
+
+	a.Body = marshalBody(r.Body, r.Headers)
+	return json.Marshal(a)
+}
+
+// UnmarshalJSON implements json.Unmarshaler for RecordedReq.
+// It detects the JSON token type of the body field and decodes accordingly:
+//   - JSON object/array: body stored as compact JSON bytes
+//   - JSON string: text or base64 based on Content-Type
+//   - JSON null: body is nil
+func (r *RecordedReq) UnmarshalJSON(data []byte) error {
+	type alias struct {
+		Method           string          `json:"method"`
+		URL              string          `json:"url"`
+		Headers          http.Header     `json:"headers"`
+		Body             json.RawMessage `json:"body"`
+		BodyHash         string          `json:"body_hash"`
+		Truncated        bool            `json:"truncated,omitempty"`
+		OriginalBodySize int64           `json:"original_body_size,omitempty"`
+	}
+
+	var a alias
+	if err := json.Unmarshal(data, &a); err != nil {
+		return fmt.Errorf("unmarshal RecordedReq: %w", err)
+	}
+
+	r.Method = a.Method
+	r.URL = a.URL
+	r.Headers = a.Headers
+	r.BodyHash = a.BodyHash
+	r.Truncated = a.Truncated
+	r.OriginalBodySize = a.OriginalBodySize
+
+	body, err := unmarshalBody(a.Body, a.Headers)
+	if err != nil {
+		return fmt.Errorf("unmarshal RecordedReq body: %w", err)
+	}
+	r.Body = body
+	return nil
+}
+
+// MarshalJSON implements json.Marshaler for RecordedResp.
+// The body field's JSON representation depends on the Content-Type from Headers
+// (same rules as RecordedReq.MarshalJSON).
+func (r RecordedResp) MarshalJSON() ([]byte, error) {
+	type alias struct {
+		StatusCode       int        `json:"status_code"`
+		Headers          http.Header `json:"headers"`
+		Body             any         `json:"body"`
+		Truncated        bool        `json:"truncated,omitempty"`
+		OriginalBodySize int64       `json:"original_body_size,omitempty"`
+		SSEEvents        []SSEEvent  `json:"sse_events,omitempty"`
+	}
+
+	a := alias{
+		StatusCode:       r.StatusCode,
+		Headers:          r.Headers,
+		Body:             nil,
+		Truncated:        r.Truncated,
+		OriginalBodySize: r.OriginalBodySize,
+		SSEEvents:        r.SSEEvents,
+	}
+
+	a.Body = marshalBody(r.Body, r.Headers)
+	return json.Marshal(a)
+}
+
+// UnmarshalJSON implements json.Unmarshaler for RecordedResp.
+// It detects the JSON token type of the body field and decodes accordingly
+// (same rules as RecordedReq.UnmarshalJSON).
+func (r *RecordedResp) UnmarshalJSON(data []byte) error {
+	type alias struct {
+		StatusCode       int             `json:"status_code"`
+		Headers          http.Header     `json:"headers"`
+		Body             json.RawMessage `json:"body"`
+		Truncated        bool            `json:"truncated,omitempty"`
+		OriginalBodySize int64           `json:"original_body_size,omitempty"`
+		SSEEvents        []SSEEvent      `json:"sse_events,omitempty"`
+	}
+
+	var a alias
+	if err := json.Unmarshal(data, &a); err != nil {
+		return fmt.Errorf("unmarshal RecordedResp: %w", err)
+	}
+
+	r.StatusCode = a.StatusCode
+	r.Headers = a.Headers
+	r.Truncated = a.Truncated
+	r.OriginalBodySize = a.OriginalBodySize
+	r.SSEEvents = a.SSEEvents
+
+	body, err := unmarshalBody(a.Body, a.Headers)
+	if err != nil {
+		return fmt.Errorf("unmarshal RecordedResp body: %w", err)
+	}
+	r.Body = body
+	return nil
+}
+
+// marshalBody returns the appropriate JSON value for the body field based on
+// the Content-Type from headers. Returns nil for nil/empty bodies.
+func marshalBody(body []byte, headers http.Header) any {
+	if len(body) == 0 {
+		return nil
+	}
+
+	ct := ""
+	if headers != nil {
+		ct = headers.Get("Content-Type")
+	}
+
+	mt, err := ParseMediaType(ct)
+	if err != nil || ct == "" {
+		// Unknown/missing CT: base64
+		return base64.StdEncoding.EncodeToString(body)
+	}
+
+	if IsJSON(mt) {
+		// Verify the body is valid JSON before emitting as native.
+		if json.Valid(body) {
+			return json.RawMessage(body)
+		}
+		// Invalid JSON despite JSON CT: fall back to base64.
+		return base64.StdEncoding.EncodeToString(body)
+	}
+
+	if IsText(mt) {
+		return string(body)
+	}
+
+	// Binary: base64
+	return base64.StdEncoding.EncodeToString(body)
+}
+
+// unmarshalBody decodes the body JSON value based on its token type and the
+// Content-Type from headers. Returns nil for JSON null or missing body.
+func unmarshalBody(raw json.RawMessage, headers http.Header) ([]byte, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+
+	// Determine the JSON token type.
+	firstByte := raw[0]
+
+	switch {
+	case firstByte == '{' || firstByte == '[':
+		// Native JSON object or array: compact to normalize whitespace.
+		// This ensures consistent Body bytes regardless of fixture indentation,
+		// which is critical for BodyHashCriterion and round-trip consistency.
+		var buf bytes.Buffer
+		if err := json.Compact(&buf, []byte(raw)); err != nil {
+			// If compact fails, store the raw bytes as-is.
+			return []byte(raw), nil
+		}
+		return buf.Bytes(), nil
+
+	case firstByte == '"':
+		// JSON string: could be text or base64.
+		var s string
+		if err := json.Unmarshal(raw, &s); err != nil {
+			return nil, fmt.Errorf("decode body string: %w", err)
+		}
+
+		ct := ""
+		if headers != nil {
+			ct = headers.Get("Content-Type")
+		}
+
+		mt, parseErr := ParseMediaType(ct)
+
+		if parseErr == nil && IsJSON(mt) {
+			// JSON CT with string value: could be a legacy base64-encoded body
+			// or a scalar JSON string value.
+			if json.Valid([]byte(s)) {
+				return []byte(s), nil
+			}
+			// Not valid JSON: try base64 decode (legacy fixture).
+			decoded, b64Err := base64.StdEncoding.DecodeString(s)
+			if b64Err == nil {
+				return decoded, nil
+			}
+			// Neither valid JSON nor valid base64: store as UTF-8 bytes.
+			return []byte(s), nil
+		}
+
+		if parseErr == nil && IsText(mt) {
+			// Text CT: store string as UTF-8 bytes.
+			return []byte(s), nil
+		}
+
+		// Binary or unknown CT: base64-decode.
+		decoded, b64Err := base64.StdEncoding.DecodeString(s)
+		if b64Err == nil {
+			return decoded, nil
+		}
+		// Graceful degradation: store as UTF-8 if base64 decode fails.
+		return []byte(s), nil
+
+	case firstByte == 't' || firstByte == 'f':
+		// JSON boolean: unexpected for body, store raw.
+		return raw, nil
+
+	default:
+		// JSON number or other: store raw.
+		return raw, nil
+	}
+}
+
 // NewTape creates a new Tape with a generated ID and the current UTC timestamp.
 func NewTape(route string, req RecordedReq, resp RecordedResp) Tape {
 	return Tape{
@@ -145,34 +367,6 @@ func BodyHashFromBytes(b []byte) string {
 	}
 	h := sha256.Sum256(b)
 	return hex.EncodeToString(h[:])
-}
-
-// detectBodyEncoding returns BodyEncodingBase64 if the Content-Type header
-// indicates a binary content type, otherwise BodyEncodingIdentity.
-// Binary types: image/*, audio/*, video/*, application/octet-stream,
-// application/protobuf, application/grpc, application/x-protobuf,
-// or any type with a non-text, non-json, non-xml primary type.
-func detectBodyEncoding(contentType string) BodyEncoding {
-	if contentType == "" {
-		return BodyEncodingIdentity
-	}
-	mediaType, _, _ := mime.ParseMediaType(contentType)
-	if mediaType == "" {
-		return BodyEncodingIdentity
-	}
-	// Text types are identity.
-	if strings.HasPrefix(mediaType, "text/") {
-		return BodyEncodingIdentity
-	}
-	// JSON and XML are text-like.
-	if mediaType == "application/json" ||
-		strings.HasSuffix(mediaType, "+json") ||
-		mediaType == "application/xml" ||
-		strings.HasSuffix(mediaType, "+xml") {
-		return BodyEncodingIdentity
-	}
-	// Everything else is binary.
-	return BodyEncodingBase64
 }
 
 // newUUID generates a UUID v4 string using crypto/rand.

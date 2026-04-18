@@ -650,6 +650,11 @@ func TestLoadConfig_MatcherValidation(t *testing.T) {
 			wantErr: `"path" does not use "paths"`,
 		},
 		{
+			name:    "content_negotiation with paths",
+			input:   `{"version":"1","matcher":{"criteria":[{"type":"content_negotiation","paths":["$.x"]}]},"rules":[{"action":"redact_headers"}]}`,
+			wantErr: `"content_negotiation" does not use "paths"`,
+		},
+		{
 			name:    "body_fuzzy invalid path syntax",
 			input:   `{"version":"1","matcher":{"criteria":[{"type":"body_fuzzy","paths":["invalid"]}]},"rules":[{"action":"redact_headers"}]}`,
 			wantErr: `invalid path syntax: "invalid"`,
@@ -916,6 +921,55 @@ func TestLoadConfig_MatcherWithRules(t *testing.T) {
 	pipeline := cfg.BuildPipeline()
 	if len(pipeline.funcs) != 1 {
 		t.Errorf("pipeline.funcs len = %d, want 1", len(pipeline.funcs))
+	}
+}
+
+func TestLoadConfig_ContentNegotiationCriterion(t *testing.T) {
+	input := `{
+		"version": "1",
+		"matcher": {
+			"criteria": [
+				{"type": "method"},
+				{"type": "path"},
+				{"type": "content_negotiation"}
+			]
+		},
+		"rules": []
+	}`
+
+	cfg, err := LoadConfig(strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if cfg.Matcher == nil {
+		t.Fatal("Matcher is nil")
+	}
+	if len(cfg.Matcher.Criteria) != 3 {
+		t.Fatalf("len(criteria) = %d, want 3", len(cfg.Matcher.Criteria))
+	}
+	if cfg.Matcher.Criteria[2].Type != "content_negotiation" {
+		t.Errorf("criteria[2].type = %q, want %q", cfg.Matcher.Criteria[2].Type, "content_negotiation")
+	}
+
+	matcher, err := cfg.BuildMatcher()
+	if err != nil {
+		t.Fatalf("BuildMatcher error: %v", err)
+	}
+
+	cm, ok := matcher.(*CompositeMatcher)
+	if !ok {
+		t.Fatalf("expected *CompositeMatcher, got %T", matcher)
+	}
+	if len(cm.criteria) != 3 {
+		t.Fatalf("criteria count = %d, want 3", len(cm.criteria))
+	}
+
+	wantNames := []string{"method", "path", "content_negotiation"}
+	for i, want := range wantNames {
+		if cm.criteria[i].Name() != want {
+			t.Errorf("criteria[%d].Name() = %q, want %q", i, cm.criteria[i].Name(), want)
+		}
 	}
 }
 

@@ -12,8 +12,20 @@
   "response": {
     "status_code": 200,
     "headers": {
-      "Content-Type": ["application/json"]
+      "Content-Type": [
+        "application/json"
+      ]
     },
-    "body": "eyJuYW1lIjoiQWxpY2UgSm9obnNvbiIsImVtYWlsIjoiYWxpY2Uuam9obnNvbkBhY21lLWNvcnAuY29tIiwicGhvbmUiOiIrMS01NTUtODY3LTUzMDkiLCJjYXJkIjp7Im51bWJlciI6IjQ1MzItMDE1OC0yNzM2LTk4NDEiLCJleHBpcnkiOiIwMy8yOCIsImN2diI6Ijg0NyJ9LCJhZGRyZXNzIjoiNzQyIEV2ZXJncmVlbiBUZXJyYWNlLCBTcHJpbmdmaWVsZCJ9"
+    "body": {
+      "name": "Alice Johnson",
+      "email": "alice.johnson@acme-corp.com",
+      "phone": "+1-555-867-5309",
+      "card": {
+        "number": "4532-0158-2736-9841",
+        "expiry": "03/28",
+        "cvv": "847"
+      },
+      "address": "742 Evergreen Terrace, Springfield"
+    }
   }
 }

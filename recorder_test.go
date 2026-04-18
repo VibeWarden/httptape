@@ -1374,47 +1374,10 @@ func BenchmarkRecorderRoundTrip_Sync(b *testing.B) {
 	}
 }
 
-// --- ADR-17: Edge case tests ---
-
-// TestDetectBodyEncoding verifies that detectBodyEncoding classifies
-// Content-Type headers into identity (text) vs base64 (binary).
-func TestDetectBodyEncoding(t *testing.T) {
-	tests := []struct {
-		name        string
-		contentType string
-		want        BodyEncoding
-	}{
-		{"empty", "", BodyEncodingIdentity},
-		{"text/plain", "text/plain", BodyEncodingIdentity},
-		{"text/html", "text/html; charset=utf-8", BodyEncodingIdentity},
-		{"application/json", "application/json", BodyEncodingIdentity},
-		{"json with charset", "application/json; charset=utf-8", BodyEncodingIdentity},
-		{"json suffix", "application/vnd.api+json", BodyEncodingIdentity},
-		{"application/xml", "application/xml", BodyEncodingIdentity},
-		{"xml suffix", "application/atom+xml", BodyEncodingIdentity},
-		{"image/png", "image/png", BodyEncodingBase64},
-		{"image/jpeg", "image/jpeg", BodyEncodingBase64},
-		{"audio/mpeg", "audio/mpeg", BodyEncodingBase64},
-		{"video/mp4", "video/mp4", BodyEncodingBase64},
-		{"octet-stream", "application/octet-stream", BodyEncodingBase64},
-		{"protobuf", "application/protobuf", BodyEncodingBase64},
-		{"grpc", "application/grpc", BodyEncodingBase64},
-		{"x-protobuf", "application/x-protobuf", BodyEncodingBase64},
-		{"unparseable", "///invalid", BodyEncodingIdentity},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := detectBodyEncoding(tt.contentType)
-			if got != tt.want {
-				t.Errorf("detectBodyEncoding(%q) = %q, want %q", tt.contentType, got, tt.want)
-			}
-		})
-	}
-}
+// --- ADR-17/ADR-41: Edge case tests ---
 
 // TestRecorder_BinaryBody verifies that binary response bodies are recorded
-// with BodyEncoding set to base64.
+// and preserved correctly.
 func TestRecorder_BinaryBody(t *testing.T) {
 	binaryData := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A} // PNG header
 
@@ -1445,15 +1408,12 @@ func TestRecorder_BinaryBody(t *testing.T) {
 	}
 
 	tape := tapes[0]
-	if tape.Response.BodyEncoding != BodyEncodingBase64 {
-		t.Errorf("response BodyEncoding = %q, want %q", tape.Response.BodyEncoding, BodyEncodingBase64)
-	}
 	if !bytes.Equal(tape.Response.Body, binaryData) {
 		t.Error("binary body not preserved correctly")
 	}
 }
 
-// TestRecorder_TextBody verifies that text response bodies get BodyEncodingIdentity.
+// TestRecorder_TextBody verifies that text response bodies are recorded correctly.
 func TestRecorder_TextBody(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -1479,8 +1439,8 @@ func TestRecorder_TextBody(t *testing.T) {
 	if len(tapes) != 1 {
 		t.Fatalf("expected 1 tape, got %d", len(tapes))
 	}
-	if tapes[0].Response.BodyEncoding != BodyEncodingIdentity {
-		t.Errorf("response BodyEncoding = %q, want %q", tapes[0].Response.BodyEncoding, BodyEncodingIdentity)
+	if string(tapes[0].Response.Body) != `{"ok":true}` {
+		t.Errorf("response body = %q, want %q", string(tapes[0].Response.Body), `{"ok":true}`)
 	}
 }
 

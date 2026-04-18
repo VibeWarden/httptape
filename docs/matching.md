@@ -147,6 +147,27 @@ Using both `BodyFuzzyCriterion` and `BodyHashCriterion` in the same matcher is s
 
 **Score: 6**
 
+### ContentNegotiationCriterion
+
+```go
+httptape.ContentNegotiationCriterion{}
+```
+
+Matches based on RFC 7231 content negotiation: the incoming request's `Accept` header is compared against the tape response's `Content-Type`. This enables multiple fixtures at the same path with different content types (e.g., JSON and XML).
+
+Scoring uses a two-pass algorithm:
+1. **Exclusion pass**: any tape whose Content-Type matches a `q=0` range in Accept is eliminated (score 0).
+2. **Match pass**: the best matching Accept range determines the score based on specificity:
+   - **Exact match** (e.g., `application/json` matches `application/json`): score 5
+   - **Subtype wildcard** (e.g., `application/*` matches `application/json`): score 4
+   - **Full wildcard** (`*/*` matches anything): score 3
+
+If the incoming request has no `Accept` header, the criterion defaults to `*/*` (matches all content types with score 3). Charset and other parameters (except `q`) are ignored.
+
+**Score: 3-5** (variable based on specificity)
+
+**Note:** Using `ContentNegotiationCriterion` alongside `HeadersCriterion{Key: "Accept", ...}` is allowed but redundant.
+
 ## Score weight table
 
 | Criterion | Score | Purpose |
@@ -156,6 +177,7 @@ Using both `BodyFuzzyCriterion` and `BodyHashCriterion` in the same matcher is s
 | PathRegexCriterion | 1 | Regex URL path |
 | RouteCriterion | 1 | Route label |
 | HeadersCriterion | 3 | Header key-value |
+| ContentNegotiationCriterion | 3-5 | Accept/Content-Type |
 | QueryParamsCriterion | 4 | Query parameters |
 | BodyFuzzyCriterion | 6 | Partial body fields |
 | BodyHashCriterion | 8 | Exact body hash |
@@ -198,6 +220,18 @@ matcher := httptape.NewCompositeMatcher(
     httptape.HeadersCriterion{Key: "Accept", Value: "application/vnd.api.v2+json"},
 )
 ```
+
+### Method + path + content negotiation (multi-format APIs)
+
+```go
+matcher := httptape.NewCompositeMatcher(
+    httptape.MethodCriterion{},
+    httptape.PathCriterion{},
+    httptape.ContentNegotiationCriterion{},
+)
+```
+
+This pattern enables multiple fixtures at the same endpoint that return different content types. For example, `GET /api/data` could have a JSON fixture and an XML fixture, selected based on the client's `Accept` header.
 
 ### Method + regex path + fuzzy body (complex POST APIs)
 

@@ -59,6 +59,8 @@ httptape/
   server_test.go
   matcher.go           # Matcher interface, Criterion, CompositeMatcher, ExactMatcher
   matcher_test.go
+  media_type.go        # MediaType parsing, classification (IsJSON/IsText/IsBinary), content negotiation
+  media_type_test.go
   store.go             # Storage port (interface)
   store_file.go        # Filesystem storage adapter (includes FileStoreOption)
   store_file_test.go

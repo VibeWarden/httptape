@@ -11174,6 +11174,981 @@ The test DOES prove:
 
 ---
 
+### ADR-41: Content-Type-driven body shape + ContentNegotiationCriterion (v0.12.0)
+
+**Date**: 2026-04-18
+**Issue**: #187 (absorbs #188, now closed)
+**Status**: Accepted
+
+#### Context
+
+httptape stores HTTP bodies as `[]byte` in the Go struct and base64-encoded
+strings in fixture JSON. This is correct but hostile to hand-authoring: a JSON
+API response body like `{"id":1,"name":"Alice"}` becomes
+`eyJpZCI6MSwibmFtZSI6IkFsaWNlIn0=` on disk. With the user about to
+integrate httptape into the VibeWarden product (hand-authored fixtures for
+deterministic AI agent testing), base64 bodies are a non-starter.
+
+Separately, multiple fixtures at the same path but different response
+Content-Types (e.g., JSON vs. XML) cannot be distinguished by the current
+matcher stack. Real HTTP APIs use `Accept` / `Content-Type` content negotiation
+for this (RFC 7231 section 5.3.2), and httptape needs a criterion that
+implements it.
+
+Both concerns share one root: **httptape must be Content-Type-aware** at
+two layers:
+
+1. **Storage layer** (body shape in fixture JSON): the fixture format should
+   represent JSON bodies as native JSON, text bodies as strings, and binary
+   bodies as base64.
+2. **Matcher layer** (content negotiation): a new `ContentNegotiationCriterion`
+   that compares the request `Accept` header against the candidate tape's
+   response `Content-Type`, using RFC 7231 specificity and q-value scoring.
+
+Both layers share a common MediaType parsing/classification utility, so they
+are designed, implemented, and shipped as a single atomic v0.12.0 breaking
+change.
+
+#### Open question resolutions
+
+**Q1: Vendor JSON types -- should `Accept: application/json` match `Content-Type: application/vnd.api+json`?**
+
+Decision: **No, strict RFC 7231 semantics. `application/json` does NOT match
+`application/vnd.api+json`.** However, `application/vnd.api+json` IS classified
+as JSON-flavored for the *body shape* layer (Layer 1) because it uses the
+`+json` structured syntax suffix (RFC 6838 section 4.2.8). These are two
+separate concerns:
+
+- Body shape classification: any media type with `+json` suffix or an
+  explicit-list match (`application/json`, `application/ld+json`,
+  `application/problem+json`) emits native JSON in fixtures. This is a
+  format decision, not a matching decision.
+- Content negotiation matching: `Accept: application/json` matches only
+  `Content-Type: application/json`, not `application/vnd.api+json`. To match
+  vendor types, the client must send `Accept: application/vnd.api+json` or
+  `Accept: application/*` or `Accept: */*`. This follows RFC 7231 section
+  5.3.2 literally.
+
+Rationale: violating RFC 7231 matching semantics to be "convenient" would
+create a subset-of-HTTP that surprises users who know the spec. The body shape
+layer can safely be more liberal because it is a display/storage concern, not a
+protocol compliance concern.
+
+**Q2: Charset and parameter handling in matching**
+
+Decision: **Parameters (except `q`) are ignored during content negotiation
+matching.** `text/plain; charset=utf-8` matches `text/plain; charset=ascii`.
+
+Rationale: RFC 7231 section 5.3.2 says parameters in the Accept header's
+media-range narrow the match, but in practice almost no real-world API
+distinguishes fixtures by charset. httptape is a mock server for testing,
+not a conformant HTTP proxy -- pragmatism wins. The `q` parameter is always
+consumed as the quality factor and never compared as a media type parameter.
+
+Implementation note: `ParseMediaType` still *parses* parameters into the
+`Parameters` map (for potential future use), but `Matches` and `MatchScore`
+compare only type and subtype. This decision can be revisited if a real use
+case arises.
+
+**Q3: Body shape for `application/x-www-form-urlencoded`**
+
+Decision: **String.** Form-encoded bodies are stored as JSON strings, e.g.,
+`"body": "username=alice&password=secret"`. No key-value object parsing.
+
+Rationale: parsing form bodies into a JSON object would create a semantic
+transform (the body bytes would no longer round-trip identically through
+encode/decode). httptape replays bodies verbatim -- the Go struct's `Body
+[]byte` is the source of truth. The fixture format is a human-friendly
+*presentation* of those bytes, not a parsed representation. Parsing is a
+separate concern that could be layered on top in the future.
+
+**Q4: Scoring weight for ContentNegotiationCriterion**
+
+Decision: **Score 5.** The weight table becomes:
+
+| Criterion                     | Score |
+|-------------------------------|-------|
+| MethodCriterion               | 1     |
+| PathCriterion                 | 2     |
+| RouteCriterion                | 1     |
+| PathRegexCriterion            | 1     |
+| HeadersCriterion              | 3     |
+| QueryParamsCriterion          | 4     |
+| **ContentNegotiationCriterion** | **5** |
+| BodyFuzzyCriterion            | 6     |
+| BodyHashCriterion             | 8     |
+
+Rationale: Content negotiation is more specific than a generic header match
+(3) or query params (4), but less specific than body-level matching (6, 8).
+Score 5 slots it between query params and body fuzzy, which matches the
+intuitive specificity ordering: discriminating by response format is more
+meaningful than matching on query parameters but less meaningful than matching
+on request body content.
+
+Within the `ContentNegotiationCriterion.Score()` method, the returned score
+is always 5 on match (not variable). The *ranking* among multiple matching
+candidates is handled by the criterion itself returning 0 for non-matching
+candidates, so the CompositeMatcher's scoring loop eliminates them. When
+multiple candidates survive, they have equal content-negotiation scores;
+other criteria (path, body, etc.) break the tie. This is intentionally simple
+for v0.12.0. A future enhancement could return a variable score based on
+specificity/q-value (e.g., exact type match scores higher than wildcard
+match), but this adds complexity without a proven need.
+
+**Refinement -- variable scoring within ContentNegotiationCriterion:**
+
+On further reflection, variable scoring *within* the criterion is valuable
+when the *only* differentiating dimension is Accept/Content-Type (e.g., three
+fixtures for `GET /users` with JSON, XML, CSV responses). In that scenario,
+all three survive method+path scoring equally. The content-negotiation criterion
+must break the tie. The scoring approach:
+
+- Exact type+subtype match: score 5
+- Subtype wildcard match (e.g., `application/*` matching `application/json`): score 4
+- Full wildcard match (`*/*`): score 3
+- No match: score 0
+
+This preserves the general position of content negotiation (3-5 range) in the
+global weight table while allowing intra-criterion ranking. If q-values differ
+among matching media ranges, the highest-q matching range determines the score
+tier; ties within a tier are broken by specificity.
+
+**Q5: Coexistence with `HeadersCriterion("Accept", ...)`**
+
+Decision: **Allowed, not an error, but documented as redundant.** If a user
+configures both `content_negotiation` and `HeadersCriterion{Key: "Accept",
+Value: "..."}`, both contribute independently to the composite score. The
+`HeadersCriterion` performs exact string matching on the Accept *request*
+header (both sides must have it), while `ContentNegotiationCriterion` performs
+RFC 7231 media-range matching against the *response* Content-Type. They test
+different things and their scores add. However, using both is almost certainly
+a mistake -- documenting this in `matcher.go` godoc and `docs/matching.md` is
+sufficient.
+
+`Validate()` does NOT produce an error for this combination -- it is not
+wrong, just unusual. No special interaction logic.
+
+**Q6: Migration tool**
+
+Decision: **In scope.** Add `httptape migrate-fixtures <dir>` as a subcommand
+in `cmd/httptape/main.go`. The tool reads each `.json` file in `<dir>`
+(non-recursively), detects old-format fixtures (body is a base64 string where
+Content-Type indicates it should be a native JSON object or text string),
+converts to new format, writes back with proper indentation + trailing newline.
+
+Behavior details:
+- Files that are already in new format are skipped (idempotent).
+- Files that are not valid Tape JSON are skipped with a warning to stderr.
+- SSE tapes (`sse_events` present and non-empty) are skipped (body is null).
+- Recursive mode via `--recursive` flag (default: non-recursive).
+- Summary printed to stdout: `migrated N files, skipped M files, errors E files`.
+- Exit code 0 on success (even if some files were skipped), non-zero if any
+  write fails.
+
+As part of this PR, run the migration tool against all fixture directories in
+the repo.
+
+**Q7: Empty body representation**
+
+Decision: **`null`.** Empty bodies (nil `Body []byte`) are represented as
+`"body": null` in fixture JSON. This is consistent with the current behavior
+(Go's `encoding/json` marshals `[]byte(nil)` as `null`), maintains backward
+compatibility for existing fixtures that already use `null`, and is
+semantically correct (`null` = "no body", not "empty string body").
+
+An explicitly empty body (`Body = []byte{}`, length 0) is also marshaled as
+`null`. The distinction between nil and empty-but-allocated is not meaningful
+at the HTTP level and should not leak into fixtures.
+
+Omitting the `body` field entirely (via `omitempty`) was considered but
+rejected: the field should always be present for structural consistency and
+to make fixtures self-documenting. A reader should never have to wonder
+whether a missing `body` field means "null body" or "field accidentally
+deleted."
+
+**Q8: File naming**
+
+Decision: **`media_type.go`** (with underscore). Go convention for multi-word
+filenames is underscore-separated (`store_file.go`, `store_memory.go`). The
+test file is `media_type_test.go`.
+
+#### Decision
+
+##### Shared utility -- `media_type.go`
+
+New file at the package root containing media type parsing, classification,
+and matching utilities. Consumed by `tape.go` (body shape dispatch) and
+`matcher.go` (ContentNegotiationCriterion).
+
+**Types:**
+
+```go
+// MediaType represents a parsed media type (e.g., "application/json; charset=utf-8").
+// It is a value type with no I/O.
+type MediaType struct {
+    // Type is the top-level type (e.g., "application", "text", "image").
+    Type string
+    // Subtype is the subtype (e.g., "json", "plain", "png").
+    // For structured syntax suffixes, this includes the full subtype
+    // (e.g., "vnd.api+json").
+    Subtype string
+    // Suffix is the structured syntax suffix without the '+' prefix
+    // (e.g., "json" for "application/vnd.api+json"). Empty if no suffix.
+    Suffix string
+    // Params holds media type parameters (e.g., charset=utf-8).
+    // The "q" parameter is extracted into QValue and not included here.
+    Params map[string]string
+    // QValue is the quality factor from the Accept header (0.0-1.0).
+    // Defaults to 1.0 if not specified.
+    QValue float64
+}
+```
+
+**Functions:**
+
+```go
+// ParseMediaType parses a single media type string (e.g., "application/json;
+// charset=utf-8") into a MediaType. Parameters including q-value are parsed.
+// Returns an error if the string is fundamentally malformed (no "/" separator).
+// Uses mime.ParseMediaType from stdlib internally.
+func ParseMediaType(s string) (MediaType, error)
+
+// ParseAccept parses an Accept header value into a slice of MediaType entries,
+// sorted by precedence (highest q-value first, then specificity).
+// Malformed individual media ranges are silently skipped.
+// An empty or missing Accept header returns a single entry for "*/*" with q=1.0.
+func ParseAccept(accept string) []MediaType
+
+// IsJSON reports whether the media type represents JSON content.
+// True for: application/json, any type with +json suffix,
+// application/ld+json, application/problem+json, etc.
+func IsJSON(mt MediaType) bool
+
+// IsText reports whether the media type represents human-readable text content.
+// True for: text/*, application/xml, application/javascript,
+// application/x-www-form-urlencoded, any type with +xml suffix.
+// False for types that IsJSON returns true for (JSON is handled separately).
+func IsText(mt MediaType) bool
+
+// IsBinary reports whether the media type represents binary content.
+// Returns true when neither IsJSON nor IsText returns true, or when
+// the media type is empty/unknown. This is the fallback classification.
+func IsBinary(mt MediaType) bool
+
+// MatchesMediaRange reports whether a response Content-Type satisfies an
+// Accept media range. Type and subtype are compared; parameters (except q)
+// are ignored per Q2 resolution. Supports wildcards: */* matches anything,
+// type/* matches any subtype of type.
+func MatchesMediaRange(accept, contentType MediaType) bool
+
+// Specificity returns a specificity score for a media range:
+//   3 for exact type/subtype (e.g., application/json)
+//   2 for subtype wildcard (e.g., application/*)
+//   1 for full wildcard (*/* )
+// Used to rank among multiple matching media ranges in an Accept header.
+func Specificity(mt MediaType) int
+```
+
+Implementation notes:
+- `ParseMediaType` wraps `mime.ParseMediaType` from stdlib, extracting the
+  `q` parameter as `QValue` (defaulting to 1.0) and splitting the media type
+  string into `Type`/`Subtype`/`Suffix`.
+- `ParseAccept` splits on comma, calls `ParseMediaType` for each entry,
+  sorts by (QValue desc, Specificity desc), silently skips malformed entries.
+- `IsJSON` checks: `Type == "application" && (Subtype == "json" || Suffix == "json")`.
+- `IsText` checks: `Type == "text"`, or
+  `Type == "application" && Subtype in {"xml", "javascript", "x-www-form-urlencoded"}`,
+  or `Suffix == "xml"`. Returns false if `IsJSON` would return true (JSON
+  takes priority).
+- `IsBinary` returns `!IsJSON(mt) && !IsText(mt)`.
+
+##### Layer 1 -- Content-Type-driven body shape in `tape.go`
+
+**Approach:** custom `MarshalJSON`/`UnmarshalJSON` on `RecordedReq` and
+`RecordedResp`. The Go struct retains `Body []byte` internally. Only the
+on-disk JSON representation changes.
+
+**Removal of `BodyEncoding` field:** The `BodyEncoding` field and
+`BodyEncoding` type are removed from both `RecordedReq` and `RecordedResp`.
+The `body_encoding` JSON field is no longer emitted. The `detectBodyEncoding`
+function is replaced by the `IsJSON`/`IsText`/`IsBinary` classifiers in
+`media_type.go`. This is a breaking change to the fixture JSON schema (the
+`body_encoding` field disappears), but it was an informational field with no
+behavioral effect on replay -- replay always writes `Body` bytes verbatim.
+
+The Recorder and Proxy still need to know the Content-Type for populating
+the body hash and (now) for nothing else in the tape construction. The
+`BodyEncoding` field was set but never read by the library itself -- it was
+purely informational for fixture authors. The new body shape makes it
+redundant because the shape itself conveys the encoding.
+
+**MarshalJSON for RecordedReq and RecordedResp:**
+
+1. Build a map representing all JSON fields except `body`.
+2. Look up the Content-Type from `Headers`.
+3. Classify using `ParseMediaType` + `IsJSON`/`IsText`/`IsBinary`.
+4. If `Body` is nil or empty: emit `"body": null`.
+5. If JSON-flavored: marshal `Body` bytes as `json.RawMessage` into the
+   `"body"` field. This emits the JSON natively (object/array/primitive)
+   without escaping. If the bytes are not valid JSON despite the Content-Type
+   claiming JSON, fall back to base64 string.
+6. If text-y: emit `"body": "<string>"` -- the body bytes interpreted as
+   UTF-8, emitted as a JSON string.
+7. If binary: emit `"body": "<base64>"` -- standard base64 encoding,
+   emitted as a JSON string. This is the same behavior as Go's default
+   `[]byte` JSON encoding.
+8. `body_encoding` is NOT emitted (field removed).
+
+**UnmarshalJSON for RecordedReq and RecordedResp:**
+
+1. Unmarshal all fields except `body` normally.
+2. Extract the raw `body` value using `json.RawMessage`.
+3. If the raw value is `null`: set `Body = nil`.
+4. Determine the JSON token type of the raw value:
+   - If JSON object (`{`) or array (`[`): the body is native JSON.
+     Marshal the raw value back to compact JSON bytes and store as `Body`.
+   - If JSON string (`"`): need to distinguish text from base64.
+     a. Unmarshal the string value.
+     b. Look up Content-Type from the already-parsed `Headers`.
+     c. If Content-Type is JSON-flavored: this is a legacy fixture or a
+        scalar JSON value stored as a string. Try `json.Valid()` on the
+        string bytes; if valid JSON, store as `Body`. Otherwise treat as
+        text.
+     d. If Content-Type is text-y: store the string as UTF-8 bytes directly.
+     e. If Content-Type is binary or unknown: base64-decode the string and
+        store the decoded bytes as `Body`. If base64 decoding fails, store
+        the string as UTF-8 bytes (graceful degradation).
+5. If `body_encoding` field is present in the JSON (legacy fixture), it is
+   silently ignored during unmarshal. The custom unmarshal does not read it.
+
+**Round-trip property:** `Marshal(Unmarshal(json))` produces identical JSON
+for all three body shapes. This is guaranteed by:
+- Native JSON bodies: stored as `json.RawMessage` on marshal, reconstructed
+  from `json.RawMessage` on unmarshal. The raw bytes are preserved exactly
+  (including whitespace from the original fixture, since `json.RawMessage` is
+  round-trip-safe for valid JSON).
+
+  **Correction:** `json.RawMessage` preserves the raw bytes during a single
+  unmarshal, but when we re-marshal the tape, we convert `Body []byte` to
+  `json.RawMessage`. If the original fixture had pretty-printed JSON in the
+  body field, and the body bytes are stored as-is, then re-marshaling will
+  produce the same pretty-printed JSON in the body field. However, if the body
+  bytes were obtained from a real HTTP response (compact JSON), the fixture
+  will show compact JSON in the body field. This is correct behavior -- the
+  body field reflects the actual bytes.
+
+- Text bodies: string <-> UTF-8 bytes is lossless for valid UTF-8.
+- Base64 bodies: base64-encode(bytes) is deterministic.
+
+**Legacy fixture compatibility:** Existing base64-only fixtures are NOT
+auto-migrated by the unmarshaler. When loading an old fixture with
+`"body": "eyJpZCI6MSwi..."` and `Content-Type: application/json`, the
+unmarshaler sees a JSON string token and Content-Type is JSON-flavored.
+It runs `json.Valid()` on the string value. Base64-encoded JSON is NOT valid
+JSON, so it falls through to binary/base64 decode. The base64-decoded bytes
+are stored as `Body`. On re-marshal, the Content-Type is JSON, so the body
+is emitted as a native JSON object. This means loading + saving an old fixture
+implicitly converts it. However, the spec says existing fixtures are migrated
+explicitly via the migration tool -- the implicit conversion on load-then-save
+is an acceptable fallback but not the primary migration path.
+
+**Interaction with sanitization:** The sanitization pipeline operates on
+`Tape` values with `Body []byte`. The sanitizer receives and returns bytes.
+The MarshalJSON/UnmarshalJSON only affects the JSON representation. No changes
+to sanitizer code are needed.
+
+**Interaction with matching:** `BodyFuzzyCriterion` and `BodyHashCriterion`
+operate on `Body []byte` (the in-memory representation). The JSON encoding
+is irrelevant to matching. No changes to matcher scoring logic are needed
+(only the new `ContentNegotiationCriterion` is added).
+
+**Interaction with replay:** `Server.ServeHTTP` writes `tape.Response.Body`
+directly. No changes needed -- the bytes are the same regardless of how they
+were encoded in JSON.
+
+##### Layer 2 -- ContentNegotiationCriterion in `matcher.go`
+
+**New type:**
+
+```go
+// ContentNegotiationCriterion selects tapes whose response Content-Type
+// satisfies the incoming request's Accept header, following RFC 7231
+// section 5.3.2 media range matching with specificity-based scoring.
+//
+// Scoring:
+//   - Exact type/subtype match:     5
+//   - Subtype wildcard match:       4
+//   - Full wildcard (*/*) match:    3
+//   - No match:                     0
+//
+// When the request has no Accept header, it is treated as Accept: */*
+// (per RFC 7231 section 5.3.2). When a candidate tape has no response
+// Content-Type header, it is treated as application/octet-stream.
+//
+// If the Accept header contains multiple media ranges, the criterion
+// uses the highest-specificity range that matches the candidate's
+// Content-Type, weighted by q-value. Media ranges with q=0 explicitly
+// exclude the Content-Type.
+//
+// Malformed Accept headers: individual malformed media ranges are silently
+// skipped. If all ranges are malformed, the Accept header is treated as */*.
+// The criterion never panics on malformed input.
+type ContentNegotiationCriterion struct{}
+
+func (ContentNegotiationCriterion) Score(req *http.Request, candidate Tape) int
+func (ContentNegotiationCriterion) Name() string // returns "content_negotiation"
+```
+
+**Score algorithm:**
+
+1. Parse the request's `Accept` header via `ParseAccept`. If absent or empty,
+   use `[MediaType{Type: "*", Subtype: "*", QValue: 1.0}]`.
+2. Parse the candidate tape's response `Content-Type` via `ParseMediaType`.
+   If absent or empty, use `MediaType{Type: "application", Subtype: "octet-stream"}`.
+3. For each media range in the parsed Accept (already sorted by q-value desc,
+   specificity desc):
+   a. If `q == 0`: if this range matches the Content-Type, immediately return
+      0 (explicitly excluded).
+   b. If `MatchesMediaRange(range, contentType)`: return the specificity score
+      (5 for exact, 4 for subtype wildcard, 3 for full wildcard).
+4. If no range matched: return 0.
+
+The iteration short-circuits on the first match because `ParseAccept` sorts
+by precedence (highest q-value first, then specificity). The first match is
+by definition the best match.
+
+##### Config integration in `config.go`
+
+Add `"content_negotiation"` to the `criterionBuilders` dispatch table:
+
+```go
+"content_negotiation": {validate: validateContentNegotiationCriterion, build: buildContentNegotiationCriterion},
+```
+
+Validation: `content_negotiation` takes no type-specific fields. If `Paths`
+is set, produce an error (same pattern as `method` and `path`).
+
+Builder: returns `ContentNegotiationCriterion{}`.
+
+The `CriterionConfig` struct does not need new fields -- `content_negotiation`
+uses no type-specific configuration.
+
+##### JSON Schema extension (`config.schema.json`)
+
+Add `"content_negotiation"` to the criterion type enum:
+
+```json
+"enum": ["method", "path", "body_fuzzy", "content_negotiation"]
+```
+
+Add an `if/then` constraint to reject `paths` when type is
+`content_negotiation` (same as `method` and `path`):
+
+```json
+{
+  "if": {
+    "properties": { "type": { "enum": ["method", "path", "content_negotiation"] } },
+    "required": ["type"]
+  },
+  "then": {
+    "properties": {
+      "paths": false
+    }
+  }
+}
+```
+
+This replaces the existing `if/then` for `["method", "path"]` -- just add
+`"content_negotiation"` to the enum array.
+
+##### CLI migration subcommand in `cmd/httptape/main.go`
+
+New subcommand `migrate-fixtures`:
+
+```
+httptape migrate-fixtures <dir> [--recursive]
+```
+
+Implementation:
+
+```go
+func runMigrateFixtures(args []string) error
+```
+
+1. Parse flags: `--recursive` (bool, default false).
+2. Read `.json` files from `<dir>` (optionally recursive).
+3. For each file:
+   a. Read file contents.
+   b. Try `json.Unmarshal` into a `Tape`. If it fails, skip with warning.
+   c. Check if migration is needed: look at the `body` field in the raw JSON.
+      If it's a string and the Content-Type indicates JSON or text, migration
+      is needed.
+   d. If migration needed: marshal the tape back to JSON (which uses the new
+      custom MarshalJSON). Write back to the same file.
+   e. Track stats: migrated, skipped, errored.
+4. Print summary.
+
+The migration tool uses the library's own `json.Unmarshal` (which now has
+custom unmarshal logic) followed by `json.MarshalIndent` (which now has
+custom marshal logic). The unmarshal reads the old format correctly (base64
+string bodies are decoded to `Body []byte`), and the marshal writes the new
+format (Content-Type-aware body shape).
+
+##### Removal of `BodyEncoding` type and fields
+
+The following are removed from `tape.go`:
+- `BodyEncoding` type alias
+- `BodyEncodingIdentity` constant
+- `BodyEncodingBase64` constant
+- `RecordedReq.BodyEncoding` field
+- `RecordedResp.BodyEncoding` field
+- `detectBodyEncoding` function
+
+The following are updated:
+- `recorder.go`: remove all `detectBodyEncoding` calls and `BodyEncoding`
+  field assignments in tape construction.
+- `proxy.go`: same removals.
+- `recorder_test.go`: remove `TestDetectBodyEncoding`,
+  `TestRecorder_BinaryBody` BodyEncoding assertion,
+  `TestRecorder_TextBody` BodyEncoding assertion.
+- `server_test.go`: remove `BodyEncoding` field from test tape construction.
+
+#### Types
+
+| Type | File | Description |
+|---|---|---|
+| `MediaType` | `media_type.go` | Parsed media type with type, subtype, suffix, params, q-value |
+| `ContentNegotiationCriterion` | `matcher.go` | Criterion implementing RFC 7231 Accept/Content-Type matching |
+
+Modified types:
+
+| Type | File | Change |
+|---|---|---|
+| `RecordedReq` | `tape.go` | Remove `BodyEncoding` field. Add custom `MarshalJSON`/`UnmarshalJSON`. |
+| `RecordedResp` | `tape.go` | Remove `BodyEncoding` field. Add custom `MarshalJSON`/`UnmarshalJSON`. |
+
+Removed types:
+
+| Type | File | Notes |
+|---|---|---|
+| `BodyEncoding` | `tape.go` | Type alias and both constants removed |
+
+#### Functions and methods
+
+New exported functions:
+
+| Function | Signature | File |
+|---|---|---|
+| `ParseMediaType` | `func ParseMediaType(s string) (MediaType, error)` | `media_type.go` |
+| `ParseAccept` | `func ParseAccept(accept string) []MediaType` | `media_type.go` |
+| `IsJSON` | `func IsJSON(mt MediaType) bool` | `media_type.go` |
+| `IsText` | `func IsText(mt MediaType) bool` | `media_type.go` |
+| `IsBinary` | `func IsBinary(mt MediaType) bool` | `media_type.go` |
+| `MatchesMediaRange` | `func MatchesMediaRange(accept, contentType MediaType) bool` | `media_type.go` |
+| `Specificity` | `func Specificity(mt MediaType) int` | `media_type.go` |
+| `ContentNegotiationCriterion.Score` | `func (ContentNegotiationCriterion) Score(req *http.Request, candidate Tape) int` | `matcher.go` |
+| `ContentNegotiationCriterion.Name` | `func (ContentNegotiationCriterion) Name() string` | `matcher.go` |
+| `RecordedReq.MarshalJSON` | `func (r RecordedReq) MarshalJSON() ([]byte, error)` | `tape.go` |
+| `RecordedReq.UnmarshalJSON` | `func (r *RecordedReq) UnmarshalJSON(data []byte) error` | `tape.go` |
+| `RecordedResp.MarshalJSON` | `func (r RecordedResp) MarshalJSON() ([]byte, error)` | `tape.go` |
+| `RecordedResp.UnmarshalJSON` | `func (r *RecordedResp) UnmarshalJSON(data []byte) error` | `tape.go` |
+
+Removed exported functions/types:
+
+| Symbol | File |
+|---|---|
+| `BodyEncoding` type | `tape.go` |
+| `BodyEncodingIdentity` const | `tape.go` |
+| `BodyEncodingBase64` const | `tape.go` |
+
+Removed unexported functions:
+
+| Symbol | File |
+|---|---|
+| `detectBodyEncoding` | `tape.go` |
+
+#### File layout
+
+**New files:**
+
+| File | Purpose |
+|---|---|
+| `media_type.go` | MediaType struct, ParseMediaType, ParseAccept, IsJSON, IsText, IsBinary, MatchesMediaRange, Specificity |
+| `media_type_test.go` | Comprehensive tests for all media type utilities |
+| `CHANGELOG.md` | Changelog with v0.12.0 entry (created if not existing) |
+
+**Modified files:**
+
+| File | Changes |
+|---|---|
+| `tape.go` | Remove `BodyEncoding` type, constants, `detectBodyEncoding`. Remove `BodyEncoding` fields from `RecordedReq` and `RecordedResp`. Add `MarshalJSON`/`UnmarshalJSON` methods on both types. |
+| `tape_test.go` | Add body marshal/unmarshal tests for all three shapes. Add round-trip tests. Update existing tests that reference `BodyEncoding`. |
+| `matcher.go` | Add `ContentNegotiationCriterion` struct with `Score` and `Name` methods. Add to `CompositeMatcher` godoc score table. |
+| `matcher_test.go` | Add `ContentNegotiationCriterion` tests: exact match, wildcard, q-value, multi-candidate, missing headers, malformed input. |
+| `config.go` | Add `"content_negotiation"` entry to `criterionBuilders`. Add `validateContentNegotiationCriterion` and `buildContentNegotiationCriterion`. Update `CriterionConfig` godoc to list `content_negotiation`. |
+| `config_test.go` | Add tests for `content_negotiation` criterion config loading and BuildMatcher. |
+| `config.schema.json` | Add `"content_negotiation"` to criterion type enum. Update `if/then` constraint. |
+| `recorder.go` | Remove `detectBodyEncoding` calls and `BodyEncoding` field assignments. |
+| `proxy.go` | Remove `detectBodyEncoding` calls and `BodyEncoding` field assignments. |
+| `recorder_test.go` | Remove/update `TestDetectBodyEncoding` and BodyEncoding assertions. |
+| `server_test.go` | Remove `BodyEncoding` fields from test tape construction. |
+| `integration_test.go` | Add end-to-end tests: (a) record+replay with JSON/text/binary bodies, (b) multi-Content-Type fixture serving with config-driven content negotiation matcher. |
+| `cmd/httptape/main.go` | Add `runMigrateFixtures` function and `"migrate-fixtures"` case in command dispatch. |
+| `cmd/httptape/main_test.go` | Add tests for `migrate-fixtures` subcommand. |
+| `docs/fixtures-authoring.md` | New body shape examples (JSON native, text string, binary base64), migration instructions. |
+| `docs/matching.md` | ContentNegotiationCriterion documentation with multi-Content-Type example. |
+| `docs/api-reference.md` | Add MediaType, ParseMediaType, ParseAccept, IsJSON, IsText, IsBinary, ContentNegotiationCriterion entries. Remove BodyEncoding entries. |
+| `docs/cli.md` | Add `migrate-fixtures` subcommand documentation. |
+| `doc.go` | Update package-level doc to mention Content-Type-aware body shape. |
+| `CLAUDE.md` | No structural changes needed. Package structure comment already says `tape.go` has `RecordedReq`/`RecordedResp`. The `media_type.go` file should be added to the package structure comment. |
+
+**Fixture files to migrate:**
+
+| Directory | Files | Action |
+|---|---|---|
+| `examples/java-spring-boot/src/test/resources/fixtures/users/` | `get-user-1.json`, `get-user-999.json`, `get-users.json` | Migrate body from base64 to native JSON |
+| `examples/java-spring-boot/src/test/resources/fixtures/openai/` | `chat-completion-headphones.json` | SSE tape -- body is null, skip |
+| `examples/kotlin-ktor-koog/src/test/resources/fixtures/weather/` | `weather-berlin.json` | Migrate body from base64 to native JSON |
+| `examples/kotlin-ktor-koog/src/test/resources/fixtures/openai/` | `chat-1.json`, `chat-2.json` | Migrate request body from base64 to native JSON; response body is null (SSE) or JSON, migrate accordingly |
+| `testcontainers/testdata/` | `config.json` | Check if it has body fields that need migration |
+
+The `examples/ts-frontend-first/.httptape-cache/fixtures/` directory contains
+machine-generated cache files. These should be migrated too (via the
+migration tool with `--recursive`), or regenerated. The `.httptape-cache`
+is gitignored in most setups, but if committed, migrate.
+
+#### Sequence
+
+**Recording flow (unchanged functionally, just removes BodyEncoding):**
+
+1. `Recorder.RoundTrip` captures request and response body bytes.
+2. Constructs `RecordedReq` and `RecordedResp` with `Body []byte`.
+3. `BodyEncoding` field no longer set (removed).
+4. Tape is passed to sanitizer, then saved to store.
+5. `FileStore.Save` calls `json.MarshalIndent(tape, ...)`.
+6. `RecordedReq.MarshalJSON` and `RecordedResp.MarshalJSON` dispatch on
+   Content-Type to produce the appropriate body shape.
+7. Fixture written to disk with native JSON / string / base64 body.
+
+**Loading flow (enhanced with custom unmarshal):**
+
+1. `FileStore.Load` reads `.json` file and calls `json.Unmarshal`.
+2. `RecordedReq.UnmarshalJSON` and `RecordedResp.UnmarshalJSON` detect the
+   JSON token type of the `body` field and decode accordingly:
+   - Object/array -> re-marshal to bytes -> `Body`
+   - String + text CT -> UTF-8 bytes -> `Body`
+   - String + binary CT -> base64 decode -> `Body`
+   - String + JSON CT -> try json.Valid, if yes store as bytes, else base64 decode -> `Body`
+   - null -> `Body = nil`
+3. The rest of the Tape fields are unmarshaled normally.
+
+**Content negotiation matching flow:**
+
+1. Request arrives at `Server.ServeHTTP` with `Accept: application/json`.
+2. Server calls `matcher.Match(req, candidates)`.
+3. `CompositeMatcher` iterates candidates. For each:
+   a. Other criteria score as usual.
+   b. `ContentNegotiationCriterion.Score` parses `Accept` header, parses
+      candidate's response `Content-Type`, computes specificity score.
+4. Candidates whose Content-Type does not satisfy Accept get score 0 and
+   are eliminated.
+5. Highest-scoring surviving candidate wins.
+
+**Migration flow:**
+
+1. User runs `httptape migrate-fixtures ./fixtures`.
+2. Tool reads each `.json` file.
+3. For each: unmarshal (custom UnmarshalJSON handles old format correctly),
+   then marshal (custom MarshalJSON produces new format).
+4. Write back to file. Print summary.
+
+#### Error cases
+
+| Error | Where | Handling |
+|---|---|---|
+| Malformed Content-Type in headers | `MarshalJSON` | Fall back to binary (base64) encoding. Never fail marshal due to bad CT. |
+| Body claims JSON but is not valid JSON | `MarshalJSON` | Fall back to base64 string. Log nothing (library). |
+| Body is base64 string but base64 decode fails | `UnmarshalJSON` | Store the string as UTF-8 bytes (graceful degradation). |
+| Missing `body` field in fixture JSON | `UnmarshalJSON` | `Body = nil`. Not an error. |
+| Unknown JSON token type for body | `UnmarshalJSON` | Return `fmt.Errorf("unexpected body type")`. |
+| Malformed Accept header | `ContentNegotiationCriterion.Score` | Skip malformed media ranges. If all malformed, treat as `*/*`. Never return error. |
+| Missing Accept header | `ContentNegotiationCriterion.Score` | Treat as `*/*` (RFC 7231). |
+| Missing Content-Type on candidate | `ContentNegotiationCriterion.Score` | Treat as `application/octet-stream`. |
+| Malformed Content-Type on candidate | `ContentNegotiationCriterion.Score` | Return 0 (cannot match). |
+| Migration tool: file is not valid Tape JSON | `runMigrateFixtures` | Skip with warning to stderr. |
+| Migration tool: write permission denied | `runMigrateFixtures` | Report error, continue with next file, exit non-zero. |
+
+#### Test strategy
+
+All tests use stdlib `testing` only. Table-driven where appropriate.
+
+**`media_type_test.go`:**
+
+1. `TestParseMediaType`: table-driven with cases:
+   - Standard types: `application/json`, `text/plain`, `image/png`
+   - With parameters: `text/plain; charset=utf-8`, `application/json; charset=utf-8`
+   - With q-value: `text/html;q=0.9`, `application/xml;q=0`
+   - Vendor types: `application/vnd.api+json`, `application/vnd.github.v3+json`
+   - Suffix extraction: `application/vnd.api+json` -> Suffix = "json"
+   - Malformed: empty string, no slash, whitespace-only, `///invalid`
+   - Edge cases: `*/*`, `application/*`, `text/*`
+
+2. `TestParseAccept`: table-driven:
+   - Single type: `application/json`
+   - Multiple types: `application/json, text/html;q=0.9, */*;q=0.1`
+   - Q-value ordering: verify sorted by q desc then specificity desc
+   - Empty/missing: returns `[*/*]`
+   - All malformed: returns `[*/*]`
+   - Mixed valid/malformed: skips malformed, keeps valid
+
+3. `TestIsJSON`: `application/json` (true), `application/vnd.api+json` (true),
+   `application/ld+json` (true), `text/plain` (false), `image/png` (false),
+   `application/xml` (false)
+
+4. `TestIsText`: `text/plain` (true), `text/html` (true), `application/xml`
+   (true), `application/javascript` (true), `application/x-www-form-urlencoded`
+   (true), `application/json` (false -- IsJSON has priority), `image/png`
+   (false)
+
+5. `TestIsBinary`: `image/png` (true), `application/octet-stream` (true),
+   `application/protobuf` (true), empty/unknown (true), `text/plain` (false),
+   `application/json` (false)
+
+6. `TestMatchesMediaRange`: table-driven:
+   - `application/json` matches `application/json` (true)
+   - `application/*` matches `application/json` (true)
+   - `*/*` matches anything (true)
+   - `application/json` does NOT match `application/vnd.api+json` (false)
+   - `text/plain` does NOT match `text/html` (false)
+   - `text/*` matches `text/html` (true)
+
+7. `TestSpecificity`: `application/json` (3), `application/*` (2), `*/*` (1)
+
+**`tape_test.go` -- body marshal/unmarshal tests:**
+
+8. `TestRecordedReq_MarshalJSON_JSONBody`: request with `Content-Type:
+   application/json` and JSON body bytes. Verify the marshaled JSON has
+   `"body": {"key": "value"}` (native object, not string).
+
+9. `TestRecordedReq_MarshalJSON_TextBody`: request with `Content-Type:
+   text/plain` and text body. Verify `"body": "hello world"`.
+
+10. `TestRecordedReq_MarshalJSON_BinaryBody`: request with `Content-Type:
+    image/png` and binary body. Verify `"body": "<base64>"`.
+
+11. `TestRecordedReq_MarshalJSON_NilBody`: body is nil. Verify `"body": null`.
+
+12. `TestRecordedReq_MarshalJSON_EmptyBody`: body is `[]byte{}`. Verify
+    `"body": null`.
+
+13. `TestRecordedReq_MarshalJSON_InvalidJSONWithJSONCT`: Content-Type claims
+    JSON but body is not valid JSON. Verify fallback to base64.
+
+14. `TestRecordedReq_MarshalJSON_VendorJSON`: Content-Type is
+    `application/vnd.api+json`. Verify native JSON output.
+
+15. `TestRecordedResp_MarshalJSON_*`: parallel tests for response (same
+    cases as above, plus SSE tape where body is null and sse_events is set).
+
+16. `TestRecordedReq_UnmarshalJSON_NativeJSON`: fixture with `"body": {"k": "v"}`.
+    Verify `Body` is `[]byte('{"k":"v"}')` (compact JSON).
+
+17. `TestRecordedReq_UnmarshalJSON_StringText`: fixture with `"body": "hello"`.
+    Verify `Body` is `[]byte("hello")`.
+
+18. `TestRecordedReq_UnmarshalJSON_Base64Binary`: fixture with `"body": "AQID"`
+    and binary Content-Type. Verify `Body` is `[]byte{1, 2, 3}`.
+
+19. `TestRecordedReq_UnmarshalJSON_Null`: fixture with `"body": null`. Verify
+    `Body` is nil.
+
+20. `TestRecordedReq_UnmarshalJSON_LegacyBase64JSON`: fixture with
+    `"body": "eyJrIjoidiJ9"` and `Content-Type: application/json`. Verify
+    `Body` is `[]byte('{"k":"v"}')` (base64-decoded).
+
+21. `TestRoundTrip_JSONBody`: marshal -> unmarshal -> marshal, verify output
+    is identical.
+
+22. `TestRoundTrip_TextBody`: same round-trip test for text.
+
+23. `TestRoundTrip_BinaryBody`: same round-trip test for binary.
+
+24. `TestRoundTrip_NilBody`: same round-trip test for nil body.
+
+**`matcher_test.go` -- ContentNegotiationCriterion tests:**
+
+25. `TestContentNegotiationCriterion_ExactMatch`: Accept `application/json`,
+    candidate CT `application/json`. Expect score 5.
+
+26. `TestContentNegotiationCriterion_SubtypeWildcard`: Accept `application/*`,
+    candidate CT `application/json`. Expect score 4.
+
+27. `TestContentNegotiationCriterion_FullWildcard`: Accept `*/*`, candidate CT
+    `application/json`. Expect score 3.
+
+28. `TestContentNegotiationCriterion_NoMatch`: Accept `text/html`, candidate
+    CT `application/json`. Expect score 0.
+
+29. `TestContentNegotiationCriterion_QValueZeroExcludes`: Accept
+    `application/json;q=0, text/html`. Candidate CT `application/json`.
+    Expect score 0.
+
+30. `TestContentNegotiationCriterion_MissingAccept`: no Accept header.
+    Candidate CT `application/json`. Expect score 3 (treated as `*/*`).
+
+31. `TestContentNegotiationCriterion_MissingContentType`: Accept
+    `application/json`. Candidate has no Content-Type. Expect score 0
+    (treated as `application/octet-stream`, which doesn't match
+    `application/json`).
+
+32. `TestContentNegotiationCriterion_MalformedAccept`: Accept header is
+    garbage. Expect score 3 (treated as `*/*` since all ranges malformed).
+
+33. `TestContentNegotiationCriterion_MultipleRanges`: Accept
+    `text/html;q=0.9, application/json, */*;q=0.1`. Candidate CT
+    `application/json`. Expect score 5 (exact match with q=1.0).
+
+34. `TestContentNegotiationCriterion_MultiCandidate`: 3 candidates with
+    different Content-Types. Verify the matcher selects the correct one based
+    on Accept header.
+
+35. `TestContentNegotiationCriterion_Name`: verify `Name()` returns
+    `"content_negotiation"`.
+
+**`config_test.go`:**
+
+36. `TestLoadConfig_ContentNegotiationCriterion`: valid config with
+    `content_negotiation` criterion type. Verify loads correctly.
+
+37. `TestConfig_BuildMatcher_ContentNegotiation`: build matcher from config
+    with `content_negotiation`, verify it returns a working matcher.
+
+38. `TestLoadConfig_ContentNegotiationWithPaths`: config with
+    `content_negotiation` + paths. Verify validation error.
+
+**`integration_test.go`:**
+
+39. `TestIntegration_ContentTypeBodyShape`: record a JSON response, verify
+    the saved fixture file has native JSON body. Record a text response,
+    verify string body. Record a binary response, verify base64 body. Load
+    all three, verify replay produces correct bytes.
+
+40. `TestIntegration_ContentNegotiation`: load 3 fixtures for the same path
+    with different response Content-Types (JSON, XML, CSV). Configure matcher
+    with method + path + content_negotiation. Send requests with varying
+    Accept headers. Assert correct fixture selected each time.
+
+**`cmd/httptape/main_test.go`:**
+
+41. `TestMigrateFixtures`: create temp dir with old-format fixture, run
+    `migrate-fixtures`, verify file is updated to new format.
+
+42. `TestMigrateFixtures_AlreadyMigrated`: create temp dir with new-format
+    fixture, run `migrate-fixtures`, verify file is unchanged.
+
+43. `TestMigrateFixtures_InvalidJSON`: create temp dir with non-JSON file,
+    run `migrate-fixtures`, verify it's skipped with no error exit.
+
+#### Alternatives considered
+
+1. **Auto-detect body encoding from content (the original #187 spec):**
+   Inspect the body bytes to determine encoding: try JSON parse, check UTF-8
+   validity, fall back to base64. Rejected because: (a) auto-detection is
+   ambiguous -- a valid UTF-8 string could be text or base64-encoded binary
+   that happens to be valid UTF-8; (b) requires heuristics that can produce
+   surprising results; (c) Content-Type is the authoritative signal for body
+   interpretation in HTTP -- ignoring it in favor of content sniffing is
+   an anti-pattern.
+
+2. **Dual encoding with `body` and `bodyText` fields (WireMock style):**
+   Two separate fields where `body` holds base64 and `bodyText` holds string.
+   Rejected because: (a) two fields for the same concept is confusing; (b)
+   requires choosing which field to populate, which is effectively the same
+   decision as the single-field approach but with more surface area; (c)
+   WireMock's approach was designed for a different context (configuration
+   files, not recorded fixtures).
+
+3. **`body_encoding` field as the dispatch signal (the existing approach,
+   enhanced):** Keep `body_encoding` field, add `"json"` as a third value.
+   When `body_encoding: "json"`, the body field contains native JSON.
+   Rejected because: (a) requires fixture authors to manually set
+   `body_encoding` correctly, which is error-prone; (b) the Content-Type
+   header already contains this information -- duplicating it in a separate
+   field violates DRY; (c) the `body_encoding` field has no behavioral effect
+   on replay (it's informational only), so it's already dead weight.
+
+4. **Separate cycles for body shape and content negotiation:** Ship body
+   shape change as v0.12.0, content negotiation as v0.13.0. Rejected because:
+   (a) both features share the MediaType utility -- building it once is
+   cleaner; (b) both touch fixtures and docs; (c) two sequential breaking
+   changes are more disruptive than one atomic change; (d) the user
+   explicitly requested a combined cycle.
+
+5. **External `mime` package for media type parsing:** Go's stdlib
+   `mime.ParseMediaType` handles parameter parsing but not Accept header
+   splitting or q-value extraction. A third-party package could provide a
+   complete RFC 7231 implementation. Rejected because: (a) stdlib-only
+   constraint in v1; (b) the subset of RFC 7231 needed here is small enough
+   to implement correctly in ~100 lines; (c) `mime.ParseMediaType` handles
+   the hard part (parameter parsing with quoted-strings, escaping, etc.) --
+   we only need to add comma-splitting and q-value extraction.
+
+#### Consequences
+
+**Benefits:**
+
+- **Fixture DX transformation:** JSON API responses are now human-readable
+  in fixture files. Hand-authoring, code review, and git diffs become
+  dramatically easier. This was the blocking issue for integrating httptape
+  into VibeWarden.
+- **Content negotiation support:** multi-format APIs (JSON/XML/CSV) can be
+  mocked with separate fixtures at the same path, selected by Accept header.
+  This is a natural extension of httptape's matching system and enables
+  real-world API mocking patterns.
+- **Shared MediaType utility:** the parsing/classification functions are
+  useful beyond these two features -- future work (e.g., response
+  transformation, conditional body processing) can reuse them.
+- **Migration tool:** existing users can upgrade fixtures mechanically
+  rather than manually editing each file.
+- **Cleaner fixture format:** removing the `body_encoding` field eliminates
+  a redundant, informational-only field that added no value.
+
+**Costs / trade-offs:**
+
+- **Breaking change:** fixture JSON format changes. The `body` field shape
+  is now polymorphic (object, string, or base64 string depending on
+  Content-Type). The `body_encoding` field is removed. All existing fixtures
+  must be migrated. Pre-1.0 status makes this acceptable.
+- **Custom MarshalJSON/UnmarshalJSON complexity:** custom JSON encoding adds
+  code to `tape.go` and requires careful testing. The round-trip property
+  must be verified. Edge cases (invalid JSON despite JSON Content-Type,
+  base64 strings that happen to look like valid JSON) require careful
+  handling.
+- **Migration burden:** every fixture in the repo (and every external user's
+  fixtures) must be migrated. The migration tool mitigates this but is still
+  work. External users pinned to v0.11 who upgrade will need to run the tool.
+- **Variable scoring in ContentNegotiationCriterion:** the 3/4/5 scoring
+  scheme (wildcard/subtype-wildcard/exact) works for the common case but
+  does not handle complex q-value scenarios perfectly. For example, two
+  Accept ranges with different q-values matching the same Content-Type at
+  different specificities could theoretically produce counter-intuitive
+  results. This is acceptable for v0.12.0 -- the scoring is deterministic
+  and correct for all practical use cases.
+
+**Future implications:**
+
+- The multi-Content-Type fixture pattern (JSON + XML + CSV at the same path)
+  becomes idiomatic and can be documented as a first-class feature.
+- `docs/fixtures-authoring.md` needs to be updated every time a new body
+  shape is added (unlikely -- the three shapes cover all practical cases).
+- The `body_encoding` removal is permanent. If a future need arises for
+  explicit encoding hints, a new field with a different design should be
+  considered rather than resurrecting the old one.
+- The `media_type.go` utility surface is public API. Adding new classifiers
+  (e.g., `IsMultipart`) is additive and backward-compatible.
+
+---
+
 ## PM Log
 
 ### 2026-04-16

@@ -1,0 +1,48 @@
+# Changelog
+
+All notable changes to httptape are documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+## [0.12.0] - 2026-04-18
+
+### Breaking Changes
+
+- **Content-Type-driven body shape**: The `body` field in fixture JSON now uses
+  Content-Type-aware serialization. JSON bodies (`application/json`, `+json` suffix)
+  are stored as native JSON objects/arrays. Text bodies (`text/*`, `application/xml`)
+  are stored as JSON strings. Binary bodies are stored as base64-encoded strings.
+  Previously, all bodies used Go's default `[]byte` JSON encoding (base64).
+- **Removed `BodyEncoding` type**: The `BodyEncoding` type, `BodyEncodingIdentity`
+  and `BodyEncodingBase64` constants, and `body_encoding` field on `RecordedReq`
+  and `RecordedResp` have been removed. The body encoding is now determined
+  automatically from the Content-Type header.
+- **Custom JSON marshaling**: `RecordedReq` and `RecordedResp` now implement
+  `json.Marshaler` and `json.Unmarshaler` for Content-Type-aware body serialization.
+  The `Body` field's JSON struct tag is now `json:"-"` (excluded from default marshaling).
+
+### Added
+
+- `media_type.go`: New `MediaType` struct and utilities (`ParseMediaType`,
+  `ParseAccept`, `IsJSON`, `IsText`, `IsBinary`, `MatchesMediaRange`, `Specificity`)
+  for Content-Type classification and RFC 7231 content negotiation.
+- `ContentNegotiationCriterion` in `matcher.go`: Matches incoming requests to
+  tapes based on the request's `Accept` header and the tape response's
+  `Content-Type`. Enables multiple fixtures at the same path with different
+  content types. Score: 3-5 (based on specificity).
+- `"content_negotiation"` criterion type in config: Configurable via the
+  declarative JSON config under `matcher.criteria`.
+- `httptape migrate-fixtures` CLI subcommand: Migrates fixtures from v0.11
+  format (base64 bodies with `body_encoding`) to v0.12 format (Content-Type-aware
+  body shape). Supports `--recursive` flag for nested directories.
+
+### Migration
+
+Run the migration tool on all fixture directories before upgrading:
+
+```bash
+httptape migrate-fixtures --recursive ./fixtures
+```
+
+The tool is idempotent and safe to run multiple times. It skips non-tape
+JSON files and reports a summary of migrated/skipped/errored files.

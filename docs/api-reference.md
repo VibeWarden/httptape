@@ -23,40 +23,56 @@ func NewTape(route string, req RecordedReq, resp RecordedResp) Tape
 
 ```go
 type RecordedReq struct {
-    Method           string       `json:"method"`
-    URL              string       `json:"url"`
-    Headers          http.Header  `json:"headers"`
-    Body             []byte       `json:"body"`
-    BodyHash         string       `json:"body_hash"`
-    BodyEncoding     BodyEncoding `json:"body_encoding,omitempty"`
-    Truncated        bool         `json:"truncated,omitempty"`
-    OriginalBodySize int64        `json:"original_body_size,omitempty"`
+    Method           string      `json:"method"`
+    URL              string      `json:"url"`
+    Headers          http.Header `json:"headers"`
+    Body             []byte      `json:"-"`
+    BodyHash         string      `json:"body_hash"`
+    Truncated        bool        `json:"truncated,omitempty"`
+    OriginalBodySize int64       `json:"original_body_size,omitempty"`
 }
 ```
+
+Implements `json.Marshaler` and `json.Unmarshaler`. The `Body` field is serialized
+based on the Content-Type header: native JSON for `application/json`, string for `text/*`,
+base64 for binary, and `null` for nil/empty.
 
 ### RecordedResp
 
 ```go
 type RecordedResp struct {
-    StatusCode       int          `json:"status_code"`
-    Headers          http.Header  `json:"headers"`
-    Body             []byte       `json:"body"`
-    BodyEncoding     BodyEncoding `json:"body_encoding,omitempty"`
-    Truncated        bool         `json:"truncated,omitempty"`
-    OriginalBodySize int64        `json:"original_body_size,omitempty"`
+    StatusCode       int         `json:"status_code"`
+    Headers          http.Header `json:"headers"`
+    Body             []byte      `json:"-"`
+    Truncated        bool        `json:"truncated,omitempty"`
+    OriginalBodySize int64       `json:"original_body_size,omitempty"`
+    SSEEvents        []SSEEvent  `json:"sse_events,omitempty"`
 }
 ```
 
-### BodyEncoding
+Implements `json.Marshaler` and `json.Unmarshaler` with the same Content-Type-driven
+body shape as `RecordedReq`.
+
+### MediaType
 
 ```go
-type BodyEncoding string
+type MediaType struct {
+    Type    string            // e.g., "application"
+    Subtype string            // e.g., "json"
+    Suffix  string            // e.g., "json" (from "+json" structured syntax suffix)
+    Params  map[string]string // e.g., {"charset": "utf-8"}
+}
 
-const (
-    BodyEncodingIdentity BodyEncoding = "identity" // UTF-8 text
-    BodyEncodingBase64   BodyEncoding = "base64"   // binary content
-)
+func ParseMediaType(s string) (MediaType, error)
+func ParseAccept(accept string) []MediaType
+func IsJSON(mt MediaType) bool
+func IsText(mt MediaType) bool
+func IsBinary(mt MediaType) bool
+func MatchesMediaRange(accept, contentType MediaType) bool
+func Specificity(mt MediaType) int
 ```
+
+Utilities for Content-Type-driven body encoding and content negotiation matching.
 
 ### Utility
 
@@ -277,6 +293,7 @@ func NewCompositeMatcher(criteria ...Criterion) *CompositeMatcher
 | RouteCriterion | `RouteCriterion{Route: route}` | 1 |
 | HeadersCriterion | `HeadersCriterion{Key: key, Value: value}` | 3 |
 | QueryParamsCriterion | `QueryParamsCriterion{}` | 4 |
+| ContentNegotiationCriterion | `ContentNegotiationCriterion{}` | 3-5 |
 | BodyFuzzyCriterion | `NewBodyFuzzyCriterion(paths ...string) *BodyFuzzyCriterion` | 6 |
 | BodyHashCriterion | `BodyHashCriterion{}` | 8 |
 

@@ -12,8 +12,17 @@
   "response": {
     "status_code": 200,
     "headers": {
-      "Content-Type": ["application/json"]
+      "Content-Type": [
+        "application/json"
+      ]
     },
-    "body": "eyJpZCI6MSwibmFtZSI6IldpcmVsZXNzIEtleWJvYXJkIiwicHJpY2UiOjQ5Ljk1LCJkZXNjcmlwdGlvbiI6IkNvbXBhY3Qgd2lyZWxlc3Mga2V5Ym9hcmQgd2l0aCBjdXN0b21pemFibGUgUkdCIGJhY2tsaWdodCBhbmQgbG93LXByb2ZpbGUgbWVjaGFuaWNhbCBzd2l0Y2hlcyIsInN0b2NrIjo0MiwiY2F0ZWdvcnkiOiJwZXJpcGhlcmFscyJ9"
+    "body": {
+      "id": 1,
+      "name": "Wireless Keyboard",
+      "price": 49.95,
+      "description": "Compact wireless keyboard with customizable RGB backlight and low-profile mechanical switches",
+      "stock": 42,
+      "category": "peripherals"
+    }
   }
 }

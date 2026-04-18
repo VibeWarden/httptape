@@ -39,13 +39,23 @@
 //   - [MemoryStore]: in-memory storage, ideal for tests.
 //   - [FileStore]: filesystem-backed storage with JSON fixtures.
 //
+// # Fixture format
+//
+// Tape fixtures use Content-Type-aware body serialization: JSON bodies are
+// stored as native JSON objects/arrays, text bodies as JSON strings, and
+// binary bodies as base64-encoded strings. This makes fixtures human-readable
+// and diff-friendly. The body shape is determined by the Content-Type header
+// of the request or response.
+//
 // # Matching
 //
 // The [Matcher] interface controls how incoming requests are matched to
 // recorded tapes. [DefaultMatcher] provides method + path matching via a
 // [CompositeMatcher]. Individual [Criterion] implementations (e.g.,
-// [MethodCriterion], [PathCriterion], [QueryParamsCriterion], [BodyHashCriterion])
-// can be composed for custom matching strategies.
+// [MethodCriterion], [PathCriterion], [QueryParamsCriterion], [BodyHashCriterion],
+// [ContentNegotiationCriterion]) can be composed for custom matching strategies.
+// [ContentNegotiationCriterion] enables multi-format fixtures at the same path,
+// selected by the request's Accept header.
 //
 // # Health endpoints (proxy mode)
 //

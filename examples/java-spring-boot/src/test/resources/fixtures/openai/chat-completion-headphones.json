@@ -6,8 +6,12 @@
     "method": "POST",
     "url": "/v1/chat/completions",
     "headers": {
-      "Content-Type": ["application/json"],
-      "Authorization": ["Bearer sk-placeholder"]
+      "Authorization": [
+        "Bearer sk-placeholder"
+      ],
+      "Content-Type": [
+        "application/json"
+      ]
     },
     "body": null,
     "body_hash": ""
@@ -15,9 +19,15 @@
   "response": {
     "status_code": 200,
     "headers": {
-      "Content-Type": ["text/event-stream"],
-      "Cache-Control": ["no-cache"],
-      "Connection": ["keep-alive"]
+      "Cache-Control": [
+        "no-cache"
+      ],
+      "Connection": [
+        "keep-alive"
+      ],
+      "Content-Type": [
+        "text/event-stream"
+      ]
     },
     "body": null,
     "sse_events": [

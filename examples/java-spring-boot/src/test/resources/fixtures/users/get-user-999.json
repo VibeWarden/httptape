@@ -12,8 +12,12 @@
   "response": {
     "status_code": 404,
     "headers": {
-      "Content-Type": ["application/json"]
+      "Content-Type": [
+        "application/json"
+      ]
     },
-    "body": "eyJlcnJvciI6InVzZXIgbm90IGZvdW5kIn0="
+    "body": {
+      "error": "user not found"
+    }
   }
 }

@@ -6,17 +6,72 @@
     "method": "POST",
     "url": "/v1/chat/completions",
     "headers": {
-      "Content-Type": ["application/json"]
+      "Content-Type": [
+        "application/json"
+      ]
     },
-    "body": "eyJtb2RlbCI6ImdwdC00by1taW5pIiwibWVzc2FnZXMiOlt7InJvbGUiOiJzeXN0ZW0iLCJjb250ZW50IjoiWW91IGFyZSBhIGhlbHBmdWwgd2VhdGhlciBhZHZpc29yLiJ9LHsicm9sZSI6InVzZXIiLCJjb250ZW50IjoiV2hhdCdzIHRoZSB3ZWF0aGVyIGluIEJlcmxpbj8gU2hvdWxkIEkgYnJpbmcgYW4gdW1icmVsbGE/In0seyJyb2xlIjoiYXNzaXN0YW50IiwiY29udGVudCI6bnVsbCwidG9vbF9jYWxscyI6W3siaWQiOiJjYWxsX3dlYXRoZXJfMSIsInR5cGUiOiJmdW5jdGlvbiIsImZ1bmN0aW9uIjp7Im5hbWUiOiJnZXRXZWF0aGVyIiwiYXJndW1lbnRzIjoie1wiY2l0eVwiOlwiQmVybGluXCJ9In19XX0seyJyb2xlIjoidG9vbCIsInRvb2xfY2FsbF9pZCI6ImNhbGxfd2VhdGhlcl8xIiwiY29udGVudCI6IntcImNpdHlcIjpcIkJlcmxpblwiLFwidGVtcFwiOjEyLFwiY29uZGl0aW9uXCI6XCJyYWluXCIsXCJodW1pZGl0eVwiOjgyLFwid2luZF9rcGhcIjoxNSxcImZlZWxzX2xpa2VcIjo5fSJ9XSwic3RyZWFtIjpmYWxzZX0=",
+    "body": {
+      "model": "gpt-4o-mini",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a helpful weather advisor."
+        },
+        {
+          "role": "user",
+          "content": "What's the weather in Berlin? Should I bring an umbrella?"
+        },
+        {
+          "role": "assistant",
+          "content": null,
+          "tool_calls": [
+            {
+              "id": "call_weather_1",
+              "type": "function",
+              "function": {
+                "name": "getWeather",
+                "arguments": "{\"city\":\"Berlin\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_weather_1",
+          "content": "{\"city\":\"Berlin\",\"temp\":12,\"condition\":\"rain\",\"humidity\":82,\"wind_kph\":15,\"feels_like\":9}"
+        }
+      ],
+      "stream": false
+    },
     "body_hash": ""
   },
   "response": {
     "status_code": 200,
     "headers": {
-      "Content-Type": ["application/json"]
+      "Content-Type": [
+        "application/json"
+      ]
     },
-    "body": "eyJpZCI6ImNoYXRjbXBsLXRjMiIsIm9iamVjdCI6ImNoYXQuY29tcGxldGlvbiIsImNyZWF0ZWQiOjE3MTMyNjQwMDIsIm1vZGVsIjoiZ3B0LTRvLW1pbmkiLCJjaG9pY2VzIjpbeyJpbmRleCI6MCwibWVzc2FnZSI6eyJyb2xlIjoiYXNzaXN0YW50IiwiY29udGVudCI6IkJhc2VkIG9uIHRoZSB3ZWF0aGVyIGluIEJlcmxpbiwgeWVzLCBicmluZyBhbiB1bWJyZWxsYS4gSXQgaXMgY3VycmVudGx5IHJhaW5pbmcgd2l0aCBhIHRlbXBlcmF0dXJlIG9mIDEyIGRlZ3JlZXMgQ2Vsc2l1cyBhbmQgaGlnaCBodW1pZGl0eSBhdCA4MiUuIn0sImZpbmlzaF9yZWFzb24iOiJzdG9wIn1dLCJ1c2FnZSI6eyJwcm9tcHRfdG9rZW5zIjoxMjAsImNvbXBsZXRpb25fdG9rZW5zIjozNSwidG90YWxfdG9rZW5zIjoxNTV9fQ==",
-    "body_hash": ""
+    "body": {
+      "id": "chatcmpl-tc2",
+      "object": "chat.completion",
+      "created": 1713264002,
+      "model": "gpt-4o-mini",
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "Based on the weather in Berlin, yes, bring an umbrella. It is currently raining with a temperature of 12 degrees Celsius and high humidity at 82%."
+          },
+          "finish_reason": "stop"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 120,
+        "completion_tokens": 35,
+        "total_tokens": 155
+      }
+    }
   }
 }
