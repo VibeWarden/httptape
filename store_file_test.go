@@ -413,14 +413,24 @@ func TestFileStore_List_CorruptJSON(t *testing.T) {
 		t.Fatalf("NewFileStore() error = %v", err)
 	}
 
-	// Write a corrupt JSON file alongside a valid one.
+	// Save a valid tape first.
+	tape := makeTape("route", "GET", "http://example.com")
+	if err := store.Save(ctx, tape); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	// Write a corrupt JSON file alongside the valid one.
 	if err := os.WriteFile(filepath.Join(dir, "bad.json"), []byte("{invalid"), 0o644); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 
-	_, err = store.List(ctx, Filter{})
-	if err == nil {
-		t.Fatal("List() with corrupt JSON: error = nil, want error")
+	// List should skip the corrupt file and return the valid tape.
+	tapes, err := store.List(ctx, Filter{})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(tapes) != 1 {
+		t.Errorf("List() returned %d tapes, want 1", len(tapes))
 	}
 }
 
@@ -610,6 +620,942 @@ func TestFileStore_TrailingNewline(t *testing.T) {
 	}
 	if data[len(data)-1] != '\n' {
 		t.Error("JSON file does not end with trailing newline")
+	}
+}
+
+// --- Filename Strategy Tests ---
+
+func TestFilenameStrategy_UUIDDefault(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+
+	// Default store (no WithFilenameStrategy option) should use UUID filenames.
+	store, err := NewFileStore(WithDirectory(dir))
+	if err != nil {
+		t.Fatalf("NewFileStore() error = %v", err)
+	}
+
+	tape := makeTape("users-api", "GET", "http://example.com/users")
+	if err := store.Save(ctx, tape); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	// Verify the file is named exactly <id>.json.
+	expectedFile := tape.ID + ".json"
+	path := filepath.Join(dir, expectedFile)
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expected file %q does not exist: %v", expectedFile, err)
+	}
+
+	// Verify the file content round-trips correctly.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	var loaded Tape
+	if err := json.Unmarshal(data, &loaded); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if loaded.ID != tape.ID {
+		t.Errorf("loaded.ID = %q, want %q", loaded.ID, tape.ID)
+	}
+
+	// Also verify explicit UUIDFilenames() produces the same result.
+	dir2 := t.TempDir()
+	store2, err := NewFileStore(WithDirectory(dir2), WithFilenameStrategy(UUIDFilenames()))
+	if err != nil {
+		t.Fatalf("NewFileStore() error = %v", err)
+	}
+	if err := store2.Save(ctx, tape); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	path2 := filepath.Join(dir2, expectedFile)
+	if _, err := os.Stat(path2); err != nil {
+		t.Fatalf("explicit UUIDFilenames: expected file %q does not exist: %v", expectedFile, err)
+	}
+}
+
+func TestFilenameStrategy_Readable_Examples(t *testing.T) {
+	strategy := ReadableFilenames()
+
+	tests := []struct {
+		name     string
+		method   string
+		url      string
+		bodyHash string
+		want     string
+	}{
+		{
+			name:   "GET simple path",
+			method: "GET",
+			url:    "http://example.com/api/users",
+			want:   "get_api-users",
+		},
+		{
+			name:     "POST with body hash",
+			method:   "POST",
+			url:      "http://example.com/api/users",
+			bodyHash: "a1b2c3d4e5f6",
+			want:     "post_api-users_a1b2",
+		},
+		{
+			name:   "GET with query string",
+			method: "GET",
+			url:    "http://example.com/api/users?page=2",
+			want:   "get_api-users_q-",
+		},
+		{
+			name:   "HEAD root path",
+			method: "HEAD",
+			url:    "http://example.com/",
+			want:   "head_root",
+		},
+		{
+			name:   "DELETE nested path",
+			method: "DELETE",
+			url:    "http://example.com/api/v2/users/123",
+			want:   "delete_api-v2-users-123",
+		},
+		{
+			name:   "PUT with special chars in path",
+			method: "PUT",
+			url:    "http://example.com/api/users/@john/~settings",
+			want:   "put_api-users-john-settings",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tape := Tape{
+				ID: "test-id",
+				Request: RecordedReq{
+					Method:   tt.method,
+					URL:      tt.url,
+					BodyHash: tt.bodyHash,
+				},
+			}
+			got := strategy(tape)
+			if tt.url == "http://example.com/api/users?page=2" {
+				// For query hash, just check the prefix since hash is deterministic
+				// but we test that separately.
+				if !strings.HasPrefix(got, tt.want) {
+					t.Errorf("ReadableFilenames()(%q %q) = %q, want prefix %q", tt.method, tt.url, got, tt.want)
+				}
+			} else if got != tt.want {
+				t.Errorf("ReadableFilenames()(%q %q) = %q, want %q", tt.method, tt.url, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFilenameStrategy_Readable_Slugify(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{"simple path", "http://example.com/api/users", "api-users"},
+		{"root path", "http://example.com/", "root"},
+		{"empty path", "http://example.com", "root"},
+		{"trailing slash", "http://example.com/api/", "api"},
+		{"special chars", "http://example.com/api/@user/~config", "api-user-config"},
+		{"unicode", "http://example.com/api/\u00e9v\u00e9nements", "api-v-nements"},
+		{"consecutive special chars", "http://example.com/api///users", "api-users"},
+		{"dots in path", "http://example.com/api/v1.2/users", "api-v1-2-users"},
+		{"percent encoded", "http://example.com/api/hello%20world", "api-hello-world"},
+		{"numbers only", "http://example.com/123/456", "123-456"},
+		{"mixed case", "http://example.com/API/Users", "api-users"},
+		{"dashes preserved", "http://example.com/my-api/my-resource", "my-api-my-resource"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := slugifyURL(tt.url)
+			if got != tt.want {
+				t.Errorf("slugifyURL(%q) = %q, want %q", tt.url, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFilenameStrategy_Readable_VeryLongPath(t *testing.T) {
+	// Create a URL with a very long path that exceeds maxFilenameLength.
+	longSegment := strings.Repeat("abcdefghij", 30) // 300 chars
+	url := "http://example.com/" + longSegment
+
+	strategy := ReadableFilenames()
+	tape := Tape{
+		ID: "test-id",
+		Request: RecordedReq{
+			Method: "GET",
+			URL:    url,
+		},
+	}
+	got := strategy(tape)
+
+	if len(got) > maxFilenameLength {
+		t.Errorf("filename length = %d, want <= %d", len(got), maxFilenameLength)
+	}
+	if got == "" {
+		t.Error("filename is empty after truncation")
+	}
+	// Should not end with a dash after truncation cleanup.
+	if strings.HasSuffix(got, "-") {
+		t.Errorf("filename %q ends with dash after truncation", got)
+	}
+}
+
+func TestFilenameStrategy_Readable_QueryHash(t *testing.T) {
+	strategy := ReadableFilenames()
+
+	// Same path, different query -> different filenames.
+	tape1 := Tape{
+		ID:      "id-1",
+		Request: RecordedReq{Method: "GET", URL: "http://example.com/api/users?page=1"},
+	}
+	tape2 := Tape{
+		ID:      "id-2",
+		Request: RecordedReq{Method: "GET", URL: "http://example.com/api/users?page=2"},
+	}
+	name1 := strategy(tape1)
+	name2 := strategy(tape2)
+
+	if name1 == name2 {
+		t.Errorf("same filename for different queries: %q", name1)
+	}
+
+	// Same query -> same filename (deterministic).
+	tape3 := Tape{
+		ID:      "id-3",
+		Request: RecordedReq{Method: "GET", URL: "http://example.com/api/users?page=1"},
+	}
+	name3 := strategy(tape3)
+	if name1 != name3 {
+		t.Errorf("different filenames for same query: %q vs %q", name1, name3)
+	}
+
+	// No query -> no q- segment.
+	tape4 := Tape{
+		ID:      "id-4",
+		Request: RecordedReq{Method: "GET", URL: "http://example.com/api/users"},
+	}
+	name4 := strategy(tape4)
+	if strings.Contains(name4, "q-") {
+		t.Errorf("filename contains q- segment for URL without query: %q", name4)
+	}
+}
+
+func TestFilenameStrategy_Readable_BodyHash(t *testing.T) {
+	strategy := ReadableFilenames()
+
+	body1 := []byte(`{"name":"alice"}`)
+	body2 := []byte(`{"name":"bob"}`)
+	hash1 := BodyHashFromBytes(body1)
+	hash2 := BodyHashFromBytes(body2)
+
+	tape1 := Tape{
+		ID:      "id-1",
+		Request: RecordedReq{Method: "POST", URL: "http://example.com/api/users", BodyHash: hash1},
+	}
+	tape2 := Tape{
+		ID:      "id-2",
+		Request: RecordedReq{Method: "POST", URL: "http://example.com/api/users", BodyHash: hash2},
+	}
+	name1 := strategy(tape1)
+	name2 := strategy(tape2)
+
+	if name1 == name2 {
+		t.Errorf("same filename for different body hashes: %q", name1)
+	}
+
+	// Both should contain the body hash prefix.
+	if !strings.Contains(name1, hash1[:4]) {
+		t.Errorf("filename %q does not contain body hash prefix %q", name1, hash1[:4])
+	}
+	if !strings.Contains(name2, hash2[:4]) {
+		t.Errorf("filename %q does not contain body hash prefix %q", name2, hash2[:4])
+	}
+
+	// No body -> no body hash segment.
+	tape3 := Tape{
+		ID:      "id-3",
+		Request: RecordedReq{Method: "GET", URL: "http://example.com/api/users", BodyHash: ""},
+	}
+	name3 := strategy(tape3)
+	// With empty body hash, the filename should just be method + slug.
+	if name3 != "get_api-users" {
+		t.Errorf("filename for GET without body = %q, want %q", name3, "get_api-users")
+	}
+}
+
+func TestFileStore_LoadByID_FastPath(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+
+	// Use default UUID strategy. Load should use fast path (<id>.json).
+	store, err := NewFileStore(WithDirectory(dir))
+	if err != nil {
+		t.Fatalf("NewFileStore() error = %v", err)
+	}
+
+	tape := makeTape("route", "GET", "http://example.com/users")
+	if err := store.Save(ctx, tape); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	// Verify the file exists at the fast-path location.
+	fastPath := filepath.Join(dir, tape.ID+".json")
+	if _, err := os.Stat(fastPath); err != nil {
+		t.Fatalf("fast-path file %q does not exist: %v", fastPath, err)
+	}
+
+	// Load by ID should succeed via fast path.
+	loaded, err := store.Load(ctx, tape.ID)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if loaded.ID != tape.ID {
+		t.Errorf("Load().ID = %q, want %q", loaded.ID, tape.ID)
+	}
+}
+
+func TestFileStore_LoadByID_ScanFallback(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+
+	// Use readable strategy. Load(id) won't find <id>.json, so it falls back to scan.
+	store, err := NewFileStore(WithDirectory(dir), WithFilenameStrategy(ReadableFilenames()))
+	if err != nil {
+		t.Fatalf("NewFileStore() error = %v", err)
+	}
+
+	tape := makeTape("route", "GET", "http://example.com/users")
+	if err := store.Save(ctx, tape); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	// Verify the file is NOT at <id>.json (it should be at get_users.json or similar).
+	fastPath := filepath.Join(dir, tape.ID+".json")
+	if _, err := os.Stat(fastPath); err == nil {
+		t.Fatalf("file should NOT exist at fast-path %q when using readable strategy", fastPath)
+	}
+
+	// Load by ID should still succeed via scan fallback.
+	loaded, err := store.Load(ctx, tape.ID)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if loaded.ID != tape.ID {
+		t.Errorf("Load().ID = %q, want %q", loaded.ID, tape.ID)
+	}
+}
+
+func TestFileStore_DeleteByID_BothPaths(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("fast path (UUID)", func(t *testing.T) {
+		dir := t.TempDir()
+		store, err := NewFileStore(WithDirectory(dir))
+		if err != nil {
+			t.Fatalf("NewFileStore() error = %v", err)
+		}
+
+		tape := makeTape("route", "GET", "http://example.com/users")
+		if err := store.Save(ctx, tape); err != nil {
+			t.Fatalf("Save() error = %v", err)
+		}
+
+		// Verify file exists.
+		fastPath := filepath.Join(dir, tape.ID+".json")
+		if _, err := os.Stat(fastPath); err != nil {
+			t.Fatalf("file does not exist before Delete")
+		}
+
+		// Delete by ID.
+		if err := store.Delete(ctx, tape.ID); err != nil {
+			t.Fatalf("Delete() error = %v", err)
+		}
+
+		// Verify file is gone.
+		if _, err := os.Stat(fastPath); !os.IsNotExist(err) {
+			t.Error("file still exists after Delete via fast path")
+		}
+	})
+
+	t.Run("scan fallback (readable)", func(t *testing.T) {
+		dir := t.TempDir()
+		store, err := NewFileStore(WithDirectory(dir), WithFilenameStrategy(ReadableFilenames()))
+		if err != nil {
+			t.Fatalf("NewFileStore() error = %v", err)
+		}
+
+		tape := makeTape("route", "GET", "http://example.com/users")
+		if err := store.Save(ctx, tape); err != nil {
+			t.Fatalf("Save() error = %v", err)
+		}
+
+		// Delete by ID should find and remove via scan.
+		if err := store.Delete(ctx, tape.ID); err != nil {
+			t.Fatalf("Delete() error = %v", err)
+		}
+
+		// Verify tape is gone.
+		_, err = store.Load(ctx, tape.ID)
+		if !errors.Is(err, ErrNotFound) {
+			t.Errorf("Load() after Delete error = %v, want ErrNotFound", err)
+		}
+	})
+}
+
+func TestFileStore_MixedStrategyDirectory(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+
+	// Save some tapes with UUID strategy.
+	storeUUID, err := NewFileStore(WithDirectory(dir))
+	if err != nil {
+		t.Fatalf("NewFileStore() error = %v", err)
+	}
+
+	tape1 := makeTape("route-a", "GET", "http://example.com/a")
+	tape2 := makeTape("route-b", "POST", "http://example.com/b")
+	if err := storeUUID.Save(ctx, tape1); err != nil {
+		t.Fatalf("Save(tape1) error = %v", err)
+	}
+	if err := storeUUID.Save(ctx, tape2); err != nil {
+		t.Fatalf("Save(tape2) error = %v", err)
+	}
+
+	// Save some tapes with readable strategy (using a new store pointing to same dir).
+	storeReadable, err := NewFileStore(WithDirectory(dir), WithFilenameStrategy(ReadableFilenames()))
+	if err != nil {
+		t.Fatalf("NewFileStore() error = %v", err)
+	}
+
+	tape3 := makeTape("route-c", "DELETE", "http://example.com/c")
+	tape4 := makeTape("route-d", "PUT", "http://example.com/d")
+	if err := storeReadable.Save(ctx, tape3); err != nil {
+		t.Fatalf("Save(tape3) error = %v", err)
+	}
+	if err := storeReadable.Save(ctx, tape4); err != nil {
+		t.Fatalf("Save(tape4) error = %v", err)
+	}
+
+	// List should return all 4 tapes regardless of strategy.
+	tapes, err := storeReadable.List(ctx, Filter{})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(tapes) != 4 {
+		t.Errorf("List() returned %d tapes, want 4", len(tapes))
+	}
+
+	// Load each tape by ID (UUID tapes need scan, readable tapes need scan from UUID store).
+	for _, tape := range []Tape{tape1, tape2, tape3, tape4} {
+		loaded, err := storeReadable.Load(ctx, tape.ID)
+		if err != nil {
+			t.Errorf("Load(%q) error = %v", tape.ID, err)
+			continue
+		}
+		if loaded.ID != tape.ID {
+			t.Errorf("Load(%q).ID = %q", tape.ID, loaded.ID)
+		}
+	}
+
+	// Delete each tape by ID.
+	for _, tape := range []Tape{tape1, tape2, tape3, tape4} {
+		if err := storeReadable.Delete(ctx, tape.ID); err != nil {
+			t.Errorf("Delete(%q) error = %v", tape.ID, err)
+		}
+	}
+
+	// Verify all tapes are gone.
+	tapes, err = storeReadable.List(ctx, Filter{})
+	if err != nil {
+		t.Fatalf("List() after deletes error = %v", err)
+	}
+	if len(tapes) != 0 {
+		t.Errorf("List() after deletes returned %d tapes, want 0", len(tapes))
+	}
+}
+
+func TestFileStore_FilenameCollision(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+
+	// Use a strategy that always returns the same stem.
+	collidingStrategy := func(tape Tape) string {
+		return "same-name"
+	}
+
+	store, err := NewFileStore(WithDirectory(dir), WithFilenameStrategy(collidingStrategy))
+	if err != nil {
+		t.Fatalf("NewFileStore() error = %v", err)
+	}
+
+	tape1 := makeTape("route-a", "GET", "http://example.com/a")
+	tape2 := makeTape("route-b", "POST", "http://example.com/b")
+
+	if err := store.Save(ctx, tape1); err != nil {
+		t.Fatalf("Save(tape1) error = %v", err)
+	}
+	if err := store.Save(ctx, tape2); err != nil {
+		t.Fatalf("Save(tape2) error = %v", err)
+	}
+
+	// Verify files: same-name.json and same-name_2.json.
+	if _, err := os.Stat(filepath.Join(dir, "same-name.json")); err != nil {
+		t.Error("expected same-name.json to exist")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "same-name_2.json")); err != nil {
+		t.Error("expected same-name_2.json to exist")
+	}
+
+	// Both tapes should be loadable.
+	loaded1, err := store.Load(ctx, tape1.ID)
+	if err != nil {
+		t.Fatalf("Load(tape1) error = %v", err)
+	}
+	if loaded1.ID != tape1.ID {
+		t.Errorf("Load(tape1).ID = %q, want %q", loaded1.ID, tape1.ID)
+	}
+
+	loaded2, err := store.Load(ctx, tape2.ID)
+	if err != nil {
+		t.Fatalf("Load(tape2) error = %v", err)
+	}
+	if loaded2.ID != tape2.ID {
+		t.Errorf("Load(tape2).ID = %q, want %q", loaded2.ID, tape2.ID)
+	}
+}
+
+func TestFileStore_FilenameCollision_ExceedsLimit(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+
+	// Use a strategy that always returns the same stem.
+	collidingStrategy := func(tape Tape) string {
+		return "collide"
+	}
+
+	store, err := NewFileStore(WithDirectory(dir), WithFilenameStrategy(collidingStrategy))
+	if err != nil {
+		t.Fatalf("NewFileStore() error = %v", err)
+	}
+
+	// Save 99 tapes to exhaust all collision slots (collide.json, collide_2.json, ..., collide_99.json).
+	for i := 0; i < maxCollisionCounter; i++ {
+		tape := makeTape("route", "GET", "http://example.com")
+		tape.ID = fmt.Sprintf("tape-%d", i)
+		if err := store.Save(ctx, tape); err != nil {
+			t.Fatalf("Save(tape-%d) error = %v", i, err)
+		}
+	}
+
+	// The 100th tape should fail with ErrFilenameCollision.
+	tape100 := makeTape("route", "GET", "http://example.com")
+	tape100.ID = "tape-100"
+	err = store.Save(ctx, tape100)
+	if err == nil {
+		t.Fatal("Save() beyond collision limit: error = nil, want ErrFilenameCollision")
+	}
+	if !errors.Is(err, ErrFilenameCollision) {
+		t.Errorf("Save() beyond collision limit: error = %v, want ErrFilenameCollision", err)
+	}
+}
+
+func TestFileStore_OverwriteWithChangedStrategy(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+
+	// Save a tape with UUID strategy.
+	storeUUID, err := NewFileStore(WithDirectory(dir))
+	if err != nil {
+		t.Fatalf("NewFileStore(UUID) error = %v", err)
+	}
+
+	tape := makeTape("route", "GET", "http://example.com/users")
+	if err := storeUUID.Save(ctx, tape); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	// Verify UUID-named file exists.
+	uuidPath := filepath.Join(dir, tape.ID+".json")
+	if _, err := os.Stat(uuidPath); err != nil {
+		t.Fatalf("UUID file does not exist: %v", err)
+	}
+
+	// Switch to readable strategy and save the same tape (same ID).
+	storeReadable, err := NewFileStore(WithDirectory(dir), WithFilenameStrategy(ReadableFilenames()))
+	if err != nil {
+		t.Fatalf("NewFileStore(Readable) error = %v", err)
+	}
+
+	if err := storeReadable.Save(ctx, tape); err != nil {
+		t.Fatalf("Save() with readable strategy error = %v", err)
+	}
+
+	// Verify old UUID file is removed.
+	if _, err := os.Stat(uuidPath); !os.IsNotExist(err) {
+		t.Error("old UUID file still exists after re-save with readable strategy")
+	}
+
+	// Verify new readable file exists and loads correctly.
+	loaded, err := storeReadable.Load(ctx, tape.ID)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if loaded.ID != tape.ID {
+		t.Errorf("Load().ID = %q, want %q", loaded.ID, tape.ID)
+	}
+
+	// Verify there's exactly 1 JSON file in the directory.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir() error = %v", err)
+	}
+	jsonCount := 0
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".json") {
+			jsonCount++
+		}
+	}
+	if jsonCount != 1 {
+		t.Errorf("directory has %d JSON files, want 1", jsonCount)
+	}
+}
+
+func TestFileStore_BackwardCompat(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+
+	// Pre-populate directory with old-style UUID-named files (simulating existing tapes).
+	tape1 := makeTape("route-a", "GET", "http://example.com/a")
+	tape2 := makeTape("route-b", "POST", "http://example.com/b")
+
+	for _, tape := range []Tape{tape1, tape2} {
+		data, err := json.MarshalIndent(tape, "", "  ")
+		if err != nil {
+			t.Fatalf("MarshalIndent() error = %v", err)
+		}
+		data = append(data, '\n')
+		path := filepath.Join(dir, tape.ID+".json")
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			t.Fatalf("WriteFile() error = %v", err)
+		}
+	}
+
+	// Open the directory with a new FileStore (default UUID strategy).
+	store, err := NewFileStore(WithDirectory(dir))
+	if err != nil {
+		t.Fatalf("NewFileStore() error = %v", err)
+	}
+
+	// List should find both tapes.
+	tapes, err := store.List(ctx, Filter{})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(tapes) != 2 {
+		t.Errorf("List() returned %d tapes, want 2", len(tapes))
+	}
+
+	// Load each tape.
+	for _, tape := range []Tape{tape1, tape2} {
+		loaded, err := store.Load(ctx, tape.ID)
+		if err != nil {
+			t.Errorf("Load(%q) error = %v", tape.ID, err)
+			continue
+		}
+		if loaded.ID != tape.ID {
+			t.Errorf("Load(%q).ID = %q", tape.ID, loaded.ID)
+		}
+	}
+
+	// Save a new tape.
+	tape3 := makeTape("route-c", "DELETE", "http://example.com/c")
+	if err := store.Save(ctx, tape3); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	// Delete one of the old tapes.
+	if err := store.Delete(ctx, tape1.ID); err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+
+	// Verify final state.
+	tapes, err = store.List(ctx, Filter{})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(tapes) != 2 {
+		t.Errorf("List() returned %d tapes after CRUD, want 2", len(tapes))
+	}
+}
+
+func TestFileStore_CorruptJSONScanSkipped(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+
+	// Use readable strategy so Load/Delete will use scan path.
+	store, err := NewFileStore(WithDirectory(dir), WithFilenameStrategy(ReadableFilenames()))
+	if err != nil {
+		t.Fatalf("NewFileStore() error = %v", err)
+	}
+
+	// Save a valid tape.
+	tape := makeTape("route", "GET", "http://example.com/users")
+	if err := store.Save(ctx, tape); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	// Drop a corrupt JSON file in the directory.
+	corruptPath := filepath.Join(dir, "corrupt.json")
+	if err := os.WriteFile(corruptPath, []byte("{not valid json at all"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	// Load should still find the valid tape (corrupt file is skipped).
+	loaded, err := store.Load(ctx, tape.ID)
+	if err != nil {
+		t.Fatalf("Load() error = %v, want nil (corrupt file should be skipped)", err)
+	}
+	if loaded.ID != tape.ID {
+		t.Errorf("Load().ID = %q, want %q", loaded.ID, tape.ID)
+	}
+
+	// List should also skip the corrupt file.
+	tapes, err := store.List(ctx, Filter{})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(tapes) != 1 {
+		t.Errorf("List() returned %d tapes, want 1", len(tapes))
+	}
+
+	// Delete should also work (scan skips corrupt file).
+	if err := store.Delete(ctx, tape.ID); err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+}
+
+func TestFileStore_EmptyStrategyFallback(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+
+	// Strategy that returns empty string -> should fall back to tape.ID.
+	emptyStrategy := func(tape Tape) string { return "" }
+
+	store, err := NewFileStore(WithDirectory(dir), WithFilenameStrategy(emptyStrategy))
+	if err != nil {
+		t.Fatalf("NewFileStore() error = %v", err)
+	}
+
+	tape := makeTape("route", "GET", "http://example.com")
+	if err := store.Save(ctx, tape); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	// Should fall back to <id>.json.
+	path := filepath.Join(dir, tape.ID+".json")
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("expected fallback file %q to exist: %v", tape.ID+".json", err)
+	}
+}
+
+func TestFileStore_ReadableStrategy_SaveAndLoad(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+
+	store, err := NewFileStore(WithDirectory(dir), WithFilenameStrategy(ReadableFilenames()))
+	if err != nil {
+		t.Fatalf("NewFileStore() error = %v", err)
+	}
+
+	tape := makeTape("route", "GET", "http://example.com/api/users")
+	if err := store.Save(ctx, tape); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	// Verify the file has a readable name.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir() error = %v", err)
+	}
+
+	found := false
+	for _, entry := range entries {
+		name := entry.Name()
+		if strings.HasSuffix(name, ".json") {
+			if strings.HasPrefix(name, "get_") {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Error("no file with readable name prefix 'get_' found")
+	}
+
+	// Load and delete should work via scan.
+	loaded, err := store.Load(ctx, tape.ID)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if loaded.ID != tape.ID {
+		t.Errorf("Load().ID = %q, want %q", loaded.ID, tape.ID)
+	}
+}
+
+func TestSlugifyURL_ControlChars(t *testing.T) {
+	// Control characters should be treated as non-slug characters.
+	got := slugifyURL("http://example.com/api/\x00\x01users")
+	if got != "api-users" {
+		t.Errorf("slugifyURL with control chars = %q, want %q", got, "api-users")
+	}
+}
+
+func TestSlugifyURL_AllSpecialChars(t *testing.T) {
+	// Path with only special characters should produce "root".
+	got := slugifyURL("http://example.com/@#$%^&*()")
+	if got != "root" {
+		t.Errorf("slugifyURL with all special chars = %q, want %q", got, "root")
+	}
+}
+
+func TestQueryHash_Deterministic(t *testing.T) {
+	h1 := queryHash("http://example.com/api?key=value")
+	h2 := queryHash("http://example.com/api?key=value")
+	if h1 != h2 {
+		t.Errorf("queryHash not deterministic: %q vs %q", h1, h2)
+	}
+	if len(h1) != 4 {
+		t.Errorf("queryHash length = %d, want 4", len(h1))
+	}
+}
+
+func TestQueryHash_Empty(t *testing.T) {
+	h := queryHash("http://example.com/api")
+	if h != "" {
+		t.Errorf("queryHash for URL without query = %q, want empty", h)
+	}
+}
+
+func TestBodyHashPrefix(t *testing.T) {
+	tests := []struct {
+		name     string
+		fullHash string
+		want     string
+	}{
+		{"normal hash", "a1b2c3d4e5f6", "a1b2"},
+		{"empty hash", "", ""},
+		{"short hash", "ab", "ab"},
+		{"exactly 4", "abcd", "abcd"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := bodyHashPrefix(tt.fullHash)
+			if got != tt.want {
+				t.Errorf("bodyHashPrefix(%q) = %q, want %q", tt.fullHash, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExtractIDFromJSON(t *testing.T) {
+	tests := []struct {
+		name    string
+		data    []byte
+		want    string
+		wantErr bool
+	}{
+		{
+			name: "valid JSON with id",
+			data: []byte(`{"id":"test-123","route":"r"}`),
+			want: "test-123",
+		},
+		{
+			name:    "invalid JSON",
+			data:    []byte(`{not valid}`),
+			wantErr: true,
+		},
+		{
+			name: "no id field",
+			data: []byte(`{"route":"r"}`),
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := extractIDFromJSON(tt.data)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("extractIDFromJSON() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if got != tt.want {
+				t.Errorf("extractIDFromJSON() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFileStore_ReadableStrategy_Overwrite(t *testing.T) {
+	// Verify that re-saving the same tape with readable strategy overwrites
+	// (does not create duplicates).
+	dir := t.TempDir()
+	ctx := context.Background()
+
+	store, err := NewFileStore(WithDirectory(dir), WithFilenameStrategy(ReadableFilenames()))
+	if err != nil {
+		t.Fatalf("NewFileStore() error = %v", err)
+	}
+
+	tape := makeTape("route", "GET", "http://example.com/api/users")
+	if err := store.Save(ctx, tape); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	// Re-save same tape with updated route.
+	tape.Route = "updated-route"
+	if err := store.Save(ctx, tape); err != nil {
+		t.Fatalf("Save() overwrite error = %v", err)
+	}
+
+	// Verify only 1 JSON file exists.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir() error = %v", err)
+	}
+	jsonCount := 0
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".json") {
+			jsonCount++
+		}
+	}
+	if jsonCount != 1 {
+		t.Errorf("directory has %d JSON files after overwrite, want 1", jsonCount)
+	}
+
+	// Verify the loaded tape has the updated route.
+	loaded, err := store.Load(ctx, tape.ID)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if loaded.Route != "updated-route" {
+		t.Errorf("Load().Route = %q, want %q", loaded.Route, "updated-route")
+	}
+}
+
+func TestFilenameStrategy_Readable_EmptyMethod(t *testing.T) {
+	strategy := ReadableFilenames()
+	tape := Tape{
+		ID:      "test-id",
+		Request: RecordedReq{Method: "", URL: "http://example.com/api"},
+	}
+	got := strategy(tape)
+	if !strings.HasPrefix(got, "unknown_") {
+		t.Errorf("ReadableFilenames() with empty method = %q, want prefix 'unknown_'", got)
 	}
 }
 
