@@ -92,7 +92,7 @@ jobs:
       # --- Java toolchain (java-spring-boot and future JVM examples) ---
       - name: Set up JDK
         if: matrix.example.java-version
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: ${{ matrix.example.java-version }}
