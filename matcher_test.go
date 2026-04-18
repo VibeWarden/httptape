@@ -1938,3 +1938,134 @@ func BenchmarkCompositeMatcher_Match(b *testing.B) {
 		}
 	})
 }
+
+// --- ContentNegotiationCriterion tests ---
+
+func TestContentNegotiationCriterion_Name(t *testing.T) {
+	c := ContentNegotiationCriterion{}
+	if c.Name() != "content_negotiation" {
+		t.Errorf("Name() = %q, want %q", c.Name(), "content_negotiation")
+	}
+}
+
+func TestContentNegotiationCriterion_Score(t *testing.T) {
+	tests := []struct {
+		name      string
+		accept    string // request Accept header
+		ct        string // candidate response Content-Type
+		wantScore int
+	}{
+		{"exact match", "application/json", "application/json", 5},
+		{"exact match with charset", "application/json", "application/json; charset=utf-8", 5},
+		{"subtype wildcard", "application/*", "application/json", 4},
+		{"full wildcard", "*/*", "application/json", 3},
+		{"missing Accept treated as wildcard", "", "application/json", 3},
+		{"missing CT treated as octet-stream", "application/octet-stream", "", 5},
+		{"no match", "text/html", "application/json", 0},
+		{"q=0 excludes", "application/json;q=0, */*", "application/json", 0},
+		{"multi-range best match", "text/html;q=0.9, application/json", "application/json", 5},
+		{"vendor type not matched by application/json", "application/json", "application/vnd.api+json", 0},
+		{"vendor type matched by exact accept", "application/vnd.api+json", "application/vnd.api+json", 5},
+		{"vendor type matched by application/*", "application/*", "application/vnd.api+json", 4},
+		{"text/plain match", "text/plain", "text/plain", 5},
+		{"text wildcard matches text/html", "text/*", "text/html", 4},
+		{"xml match", "application/xml", "application/xml", 5},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := ContentNegotiationCriterion{}
+
+			req := httptest.NewRequest("GET", "/api/data", nil)
+			if tt.accept != "" {
+				req.Header.Set("Accept", tt.accept)
+			}
+
+			tape := Tape{
+				Response: RecordedResp{
+					StatusCode: 200,
+				},
+			}
+			if tt.ct != "" {
+				tape.Response.Headers = http.Header{"Content-Type": {tt.ct}}
+			}
+
+			got := c.Score(req, tape)
+			if got != tt.wantScore {
+				t.Errorf("Score() = %d, want %d", got, tt.wantScore)
+			}
+		})
+	}
+}
+
+func TestContentNegotiationCriterion_MultiCandidate(t *testing.T) {
+	jsonTape := Tape{
+		ID: "json-tape",
+		Request: RecordedReq{
+			Method: "GET",
+			URL:    "http://example.com/users",
+		},
+		Response: RecordedResp{
+			StatusCode: 200,
+			Headers:    http.Header{"Content-Type": {"application/json"}},
+			Body:       []byte(`{"users":[]}`),
+		},
+	}
+	xmlTape := Tape{
+		ID: "xml-tape",
+		Request: RecordedReq{
+			Method: "GET",
+			URL:    "http://example.com/users",
+		},
+		Response: RecordedResp{
+			StatusCode: 200,
+			Headers:    http.Header{"Content-Type": {"application/xml"}},
+			Body:       []byte(`<users/>`),
+		},
+	}
+	csvTape := Tape{
+		ID: "csv-tape",
+		Request: RecordedReq{
+			Method: "GET",
+			URL:    "http://example.com/users",
+		},
+		Response: RecordedResp{
+			StatusCode: 200,
+			Headers:    http.Header{"Content-Type": {"text/csv"}},
+			Body:       []byte("id,name\n1,Alice"),
+		},
+	}
+
+	candidates := []Tape{jsonTape, xmlTape, csvTape}
+
+	matcher := NewCompositeMatcher(
+		MethodCriterion{},
+		PathCriterion{},
+		ContentNegotiationCriterion{},
+	)
+
+	tests := []struct {
+		name   string
+		accept string
+		wantID string
+	}{
+		{"accept json", "application/json", "json-tape"},
+		{"accept xml", "application/xml", "xml-tape"},
+		{"accept csv", "text/csv", "csv-tape"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "/users", nil)
+			req.Header.Set("Accept", tt.accept)
+
+			tape, ok := matcher.Match(req, candidates)
+			if !ok {
+				t.Fatal("expected match, got none")
+			}
+			if tape.ID != tt.wantID {
+				t.Errorf("matched tape ID = %q, want %q", tape.ID, tt.wantID)
+			}
+		})
+	}
+}

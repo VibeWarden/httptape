@@ -636,6 +636,249 @@ func TestServeNoConfig(t *testing.T) {
 	}
 }
 
+func TestMigrateFixtures_Help(t *testing.T) {
+	got := run([]string{"migrate-fixtures", "-h"})
+	if got != exitOK {
+		t.Errorf("got exit %d, want %d", got, exitOK)
+	}
+}
+
+func TestMigrateFixtures_MissingDir(t *testing.T) {
+	got := run([]string{"migrate-fixtures"})
+	if got != exitUsage {
+		t.Errorf("got exit %d, want %d", got, exitUsage)
+	}
+}
+
+func TestMigrateFixtures_NonexistentDir(t *testing.T) {
+	got := run([]string{"migrate-fixtures", "/nonexistent/path/xyz"})
+	if got != exitRuntime {
+		t.Errorf("got exit %d, want %d", got, exitRuntime)
+	}
+}
+
+func TestMigrateFixtures_NotADirectory(t *testing.T) {
+	f, err := os.CreateTemp("", "httptape-test-*.json")
+	if err != nil {
+		t.Fatalf("create temp: %v", err)
+	}
+	defer os.Remove(f.Name())
+	f.Close()
+
+	got := run([]string{"migrate-fixtures", f.Name()})
+	if got != exitRuntime {
+		t.Errorf("got exit %d, want %d", got, exitRuntime)
+	}
+}
+
+func TestMigrateFixtures_MigratesLegacyTape(t *testing.T) {
+	dir := t.TempDir()
+
+	// Write a legacy fixture with base64-encoded JSON body and body_encoding field.
+	legacy := `{
+  "id": "test-001",
+  "route": "api",
+  "recorded_at": "2026-01-01T00:00:00Z",
+  "request": {
+    "method": "GET",
+    "url": "http://example.com/api/users",
+    "headers": {"Accept": ["application/json"]},
+    "body": null,
+    "body_hash": ""
+  },
+  "response": {
+    "status_code": 200,
+    "headers": {"Content-Type": ["application/json"]},
+    "body": "eyJuYW1lIjoiYWxpY2UifQ==",
+    "body_encoding": "base64"
+  }
+}`
+	path := filepath.Join(dir, "tape.json")
+	if err := os.WriteFile(path, []byte(legacy), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	got := run([]string{"migrate-fixtures", dir})
+	if got != exitOK {
+		t.Fatalf("got exit %d, want %d", got, exitOK)
+	}
+
+	// Read the migrated file.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+
+	// Verify body is now native JSON (not base64 string).
+	if !strings.Contains(string(data), `"name"`) {
+		t.Errorf("migrated fixture should contain native JSON body, got:\n%s", data)
+	}
+	// Verify body_encoding field is removed.
+	if strings.Contains(string(data), "body_encoding") {
+		t.Errorf("migrated fixture should not contain body_encoding, got:\n%s", data)
+	}
+	// Verify trailing newline.
+	if data[len(data)-1] != '\n' {
+		t.Error("migrated fixture should end with newline")
+	}
+}
+
+func TestMigrateFixtures_SkipsNonTapeJSON(t *testing.T) {
+	dir := t.TempDir()
+
+	// Write a JSON file that is not a valid tape.
+	notTape := `{"foo": "bar"}`
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(notTape), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	got := run([]string{"migrate-fixtures", dir})
+	if got != exitOK {
+		t.Fatalf("got exit %d, want %d", got, exitOK)
+	}
+
+	// Verify file is unchanged.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(data) != notTape {
+		t.Errorf("non-tape file should be unchanged, got:\n%s", data)
+	}
+}
+
+func TestMigrateFixtures_SkipsNonJSONFiles(t *testing.T) {
+	dir := t.TempDir()
+
+	// Write a non-JSON file.
+	path := filepath.Join(dir, "readme.txt")
+	content := "not a json file"
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	got := run([]string{"migrate-fixtures", dir})
+	if got != exitOK {
+		t.Fatalf("got exit %d, want %d", got, exitOK)
+	}
+
+	// Verify file is unchanged.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(data) != content {
+		t.Errorf("non-JSON file should be unchanged, got:\n%s", data)
+	}
+}
+
+func TestMigrateFixtures_RecursiveFlag(t *testing.T) {
+	dir := t.TempDir()
+	subDir := filepath.Join(dir, "subdir")
+	if err := os.MkdirAll(subDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	// Write a legacy tape in a subdirectory.
+	legacy := `{
+  "id": "test-002",
+  "route": "api",
+  "recorded_at": "2026-01-01T00:00:00Z",
+  "request": {
+    "method": "POST",
+    "url": "http://example.com/api/data",
+    "headers": {"Content-Type": ["text/plain"]},
+    "body": "aGVsbG8=",
+    "body_hash": "abc123",
+    "body_encoding": "base64"
+  },
+  "response": {
+    "status_code": 200,
+    "headers": {"Content-Type": ["text/plain"]},
+    "body": "d29ybGQ=",
+    "body_encoding": "base64"
+  }
+}`
+	path := filepath.Join(subDir, "tape.json")
+	if err := os.WriteFile(path, []byte(legacy), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// Without --recursive, subdirectories are skipped.
+	got := run([]string{"migrate-fixtures", dir})
+	if got != exitOK {
+		t.Fatalf("got exit %d, want %d", got, exitOK)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	// File should still have body_encoding because it wasn't processed.
+	if !strings.Contains(string(data), "body_encoding") {
+		t.Error("without --recursive, subdirectory fixture should be unchanged")
+	}
+
+	// With --recursive, subdirectories are processed.
+	got = run([]string{"migrate-fixtures", "--recursive", dir})
+	if got != exitOK {
+		t.Fatalf("got exit %d, want %d", got, exitOK)
+	}
+	data, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if strings.Contains(string(data), "body_encoding") {
+		t.Errorf("with --recursive, fixture should be migrated (no body_encoding), got:\n%s", data)
+	}
+
+	// text/plain body should be a string in the migrated fixture.
+	if !strings.Contains(string(data), `"hello"`) || !strings.Contains(string(data), `"world"`) {
+		t.Errorf("text/plain bodies should be decoded as strings, got:\n%s", data)
+	}
+}
+
+func TestMigrateFixtures_AlreadyMigratedTape(t *testing.T) {
+	dir := t.TempDir()
+
+	// Write a tape that is already in the new format (native JSON body).
+	modern := `{
+  "id": "test-003",
+  "route": "api",
+  "recorded_at": "2026-01-01T00:00:00Z",
+  "request": {
+    "method": "GET",
+    "url": "http://example.com/api/health",
+    "headers": {},
+    "body": null,
+    "body_hash": ""
+  },
+  "response": {
+    "status_code": 200,
+    "headers": {"Content-Type": ["application/json"]},
+    "body": {"status": "ok"}
+  }
+}`
+	path := filepath.Join(dir, "tape.json")
+	if err := os.WriteFile(path, []byte(modern), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	got := run([]string{"migrate-fixtures", dir})
+	if got != exitOK {
+		t.Fatalf("got exit %d, want %d", got, exitOK)
+	}
+
+	// Read and verify the body is still native JSON.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !strings.Contains(string(data), `"status"`) {
+		t.Errorf("already-migrated fixture should still have native JSON body, got:\n%s", data)
+	}
+}
+
 func itoa(i int) string {
 	const digits = "0123456789"
 	if i == 0 {

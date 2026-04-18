@@ -904,3 +904,101 @@ func TestIntegration_ConfigDrivenMatcher_BodyFuzzy(t *testing.T) {
 		t.Error("both requests returned the same response; body_fuzzy matching did not distinguish them")
 	}
 }
+
+// TestIntegration_ContentNegotiation_MultiCT tests the content negotiation
+// matching flow: two fixtures at the same path return different Content-Types
+// (JSON vs XML), and the ContentNegotiationCriterion selects the right one
+// based on the Accept header.
+func TestIntegration_ContentNegotiation_MultiCT(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := t.Context()
+
+	// Tape 1: JSON response.
+	tape1 := NewTape("api", RecordedReq{
+		Method:  "GET",
+		URL:     "http://example.com/api/data",
+		Headers: http.Header{"Accept": {"application/json"}},
+	}, RecordedResp{
+		StatusCode: 200,
+		Headers:    http.Header{"Content-Type": {"application/json"}},
+		Body:       []byte(`{"format":"json","value":42}`),
+	})
+	if err := store.Save(ctx, tape1); err != nil {
+		t.Fatalf("save tape1: %v", err)
+	}
+
+	// Tape 2: XML response.
+	tape2 := NewTape("api", RecordedReq{
+		Method:  "GET",
+		URL:     "http://example.com/api/data",
+		Headers: http.Header{"Accept": {"application/xml"}},
+	}, RecordedResp{
+		StatusCode: 200,
+		Headers:    http.Header{"Content-Type": {"application/xml"}},
+		Body:       []byte(`<data><format>xml</format><value>42</value></data>`),
+	})
+	if err := store.Save(ctx, tape2); err != nil {
+		t.Fatalf("save tape2: %v", err)
+	}
+
+	// Build matcher using method + path + content_negotiation.
+	cfg := &Config{
+		Version: "1",
+		Matcher: &MatcherConfig{
+			Criteria: []CriterionConfig{
+				{Type: "method"},
+				{Type: "path"},
+				{Type: "content_negotiation"},
+			},
+		},
+		Rules: []Rule{},
+	}
+
+	matcher, err := cfg.BuildMatcher()
+	if err != nil {
+		t.Fatalf("BuildMatcher: %v", err)
+	}
+
+	srv := NewServer(store, WithMatcher(matcher))
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	// Request with Accept: application/json -- should get JSON tape.
+	req1, _ := http.NewRequest("GET", ts.URL+"/api/data", nil)
+	req1.Header.Set("Accept", "application/json")
+	resp1, err := http.DefaultClient.Do(req1)
+	if err != nil {
+		t.Fatalf("GET (json): %v", err)
+	}
+	body1, _ := io.ReadAll(resp1.Body)
+	resp1.Body.Close()
+
+	if resp1.StatusCode != 200 {
+		t.Errorf("json status = %d, want 200", resp1.StatusCode)
+	}
+	if !strings.Contains(string(body1), `"format":"json"`) {
+		t.Errorf("json body = %q, want JSON response", string(body1))
+	}
+
+	// Request with Accept: application/xml -- should get XML tape.
+	req2, _ := http.NewRequest("GET", ts.URL+"/api/data", nil)
+	req2.Header.Set("Accept", "application/xml")
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatalf("GET (xml): %v", err)
+	}
+	body2, _ := io.ReadAll(resp2.Body)
+	resp2.Body.Close()
+
+	if resp2.StatusCode != 200 {
+		t.Errorf("xml status = %d, want 200", resp2.StatusCode)
+	}
+	if !strings.Contains(string(body2), "<format>xml</format>") {
+		t.Errorf("xml body = %q, want XML response", string(body2))
+	}
+
+	// Verify they got different responses.
+	if string(body1) == string(body2) {
+		t.Error("both requests returned the same response; content negotiation did not distinguish them")
+	}
+}

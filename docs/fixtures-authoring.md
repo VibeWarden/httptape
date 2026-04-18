@@ -32,7 +32,7 @@ Every fixture file is a single JSON object with these fields:
     "headers": {
       "Content-Type": ["application/json"]
     },
-    "body": "eyJ1c2VycyI6W3siaWQiOjEsIm5hbWUiOiJBbGljZSJ9XX0="
+    "body": {"users": [{"id": 1, "name": "Alice"}]}
   },
   "metadata": {}
 }
@@ -48,29 +48,34 @@ Every fixture file is a single JSON object with these fields:
 | `request.method` | string | Yes | HTTP method (`GET`, `POST`, `PUT`, `DELETE`, `PATCH`, `HEAD`). |
 | `request.url` | string | Yes | Full URL. The path component is used for matching (e.g., `http://mock/api/users`). |
 | `request.headers` | object | No | Request headers. Each key maps to an array of strings. |
-| `request.body` | string/null | No | Base64-encoded request body, or `null` for bodiless requests. |
+| `request.body` | varies | No | Request body. Shape depends on Content-Type (see below). `null` for bodiless requests. |
 | `request.body_hash` | string | No | Hex-encoded SHA-256 hash of the original request body. Required for `BodyHashCriterion`. |
-| `request.body_encoding` | string | No | `"identity"` for UTF-8 text, `"base64"` for binary. Defaults to identity if omitted. |
 | `response.status_code` | int | Yes | HTTP status code (200, 201, 204, 404, 500, etc.). |
 | `response.headers` | object | No | Response headers. Each key maps to an array of strings. |
-| `response.body` | string/null | No | Base64-encoded response body. |
-| `response.body_encoding` | string | No | Same as request body encoding. |
+| `response.body` | varies | No | Response body. Shape depends on Content-Type (see below). |
 | `metadata` | object | No | Key-value pairs for delay/error simulation. Not used for matching. |
 
-### Body encoding
+### Content-Type-driven body shape (v0.12+)
 
-Go's `encoding/json` handles `[]byte` fields as base64 automatically. When authoring by hand:
+The `body` field's JSON representation depends on the `Content-Type` header:
 
-- **JSON response bodies**: base64-encode the JSON string and set the body field
-- **Text responses**: base64-encode the text
-- **No body** (e.g., 204): set body to `null`
+| Content-Type | Body shape | Example |
+|---|---|---|
+| `application/json`, `+json` suffix | Native JSON object/array | `{"name": "Alice"}` |
+| `text/*`, `application/xml`, `application/javascript` | JSON string | `"Hello, world!"` |
+| Binary (`image/*`, `application/octet-stream`, etc.) | Base64-encoded string | `"aGVsbG8="` |
+| Missing or unknown | Base64-encoded string | `"aGVsbG8="` |
+| Nil or empty body | `null` | `null` |
 
-To base64-encode on the command line:
+This means JSON fixtures are human-readable: response bodies appear as native JSON objects, not opaque base64 strings.
+
+**Migrating from v0.11:** Fixtures created with v0.11 used base64 encoding for all bodies and included a `body_encoding` field. Use the migration tool to convert:
 
 ```bash
-echo -n '{"users":[{"id":1,"name":"Alice"}]}' | base64
-# eyJ1c2VycyI6W3siaWQiOjEsIm5hbWUiOiJBbGljZSJ9XX0=
+httptape migrate-fixtures --recursive ./fixtures
 ```
+
+The migration tool reads each `.json` file, decodes any base64 bodies, removes the `body_encoding` field, and writes the fixture in the new Content-Type-aware format. It is safe to run multiple times (idempotent).
 
 ### URL format and matching
 
@@ -104,16 +109,17 @@ The `request.url` field stores a full URL, but the `DefaultMatcher` (used by the
       "Content-Type": ["application/json"],
       "X-Total-Count": ["42"]
     },
-    "body": "eyJ1c2VycyI6W3siaWQiOjEsIm5hbWUiOiJBbGljZSJ9LHsiaWQiOjIsIm5hbWUiOiJCb2IifV19"
+    "body": {
+      "users": [
+        {"id": 1, "name": "Alice"},
+        {"id": 2, "name": "Bob"}
+      ]
+    }
   }
 }
 ```
 
-The response body decodes to:
-
-```json
-{"users":[{"id":1,"name":"Alice"},{"id":2,"name":"Bob"}]}
-```
+The response body is native JSON -- no encoding needed.
 
 ### POST returning created resource (201)
 
@@ -139,15 +145,13 @@ The response body decodes to:
       "Content-Type": ["application/json"],
       "Location": ["/api/users/3"]
     },
-    "body": "eyJpZCI6MywibmFtZSI6IkNoYXJsaWUiLCJjcmVhdGVkX2F0IjoiMjAyNS0wMS0xNVQxMDowMDowMFoifQ=="
+    "body": {
+      "id": 3,
+      "name": "Charlie",
+      "created_at": "2025-01-15T10:00:00Z"
+    }
   }
 }
-```
-
-The response body decodes to:
-
-```json
-{"id":3,"name":"Charlie","created_at":"2025-01-15T10:00:00Z"}
 ```
 
 ### DELETE returning 204 No Content
@@ -202,10 +206,39 @@ The response body decodes to:
       "X-Per-Page": ["10"],
       "Link": ["<http://mock/api/users?page=3&per_page=10>; rel=\"next\""]
     },
-    "body": "eyJ1c2VycyI6W3siaWQiOjExLCJuYW1lIjoiS2FyZW4ifV19"
+    "body": {
+      "users": [{"id": 11, "name": "Karen"}]
+    }
   }
 }
 ```
+
+### GET returning text (text/plain)
+
+**File:** `fixtures/get-health.json`
+
+```json
+{
+  "id": "get-health",
+  "route": "health",
+  "request": {
+    "method": "GET",
+    "url": "http://mock/health",
+    "headers": {},
+    "body": null,
+    "body_hash": ""
+  },
+  "response": {
+    "status_code": 200,
+    "headers": {
+      "Content-Type": ["text/plain"]
+    },
+    "body": "OK"
+  }
+}
+```
+
+Text bodies are stored as JSON strings -- no base64 encoding needed.
 
 ## Metadata: delay and error simulation
 
@@ -230,7 +263,7 @@ Add a `delay` key with a Go duration string:
     "headers": {
       "Content-Type": ["application/json"]
     },
-    "body": "eyJzdGF0dXMiOiJjb21wbGV0ZSJ9"
+    "body": {"status": "complete"}
   },
   "metadata": {
     "delay": "2s"
@@ -261,7 +294,7 @@ Add an `error` key with a `status` code and optional `body`:
     "headers": {
       "Content-Type": ["application/json"]
     },
-    "body": "eyJvayI6dHJ1ZX0="
+    "body": {"ok": true}
   },
   "metadata": {
     "error": {
@@ -321,7 +354,7 @@ store, err := httptape.NewFileStore(httptape.WithDirectory("./testdata/api-fixtu
 
 **Keep the `route` consistent.** If you plan to filter fixtures by route (e.g., to run tests against a subset), use the same route string across related fixtures.
 
-**Omit optional fields.** Fields like `body_hash`, `body_encoding`, `recorded_at`, and `metadata` can be omitted entirely:
+**Omit optional fields.** Fields like `body_hash`, `recorded_at`, and `metadata` can be omitted entirely:
 
 ```json
 {
@@ -338,20 +371,12 @@ store, err := httptape.NewFileStore(httptape.WithDirectory("./testdata/api-fixtu
     "headers": {
       "Content-Type": ["application/json"]
     },
-    "body": "eyJzdGF0dXMiOiJvayJ9"
+    "body": {"status": "ok"}
   }
 }
 ```
 
-**Base64 helper script.** Create a shell alias for encoding response bodies:
-
-```bash
-alias b64='python3 -c "import sys,base64; print(base64.b64encode(sys.stdin.buffer.read()).decode())"'
-
-# Usage:
-echo -n '{"status":"ok"}' | b64
-# eyJzdGF0dXMiOiJvayJ9
-```
+**Write JSON bodies as native JSON.** Since v0.12, JSON response bodies are written as native JSON objects -- no base64 encoding needed. Just write the JSON inline in the `body` field.
 
 **Validate your fixtures.** Load fixtures with `FileStore` and check for JSON parse errors:
 

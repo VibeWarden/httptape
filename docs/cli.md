@@ -176,6 +176,41 @@ httptape import --fixtures ./fixtures --input bundle.tar.gz
 cat bundle.tar.gz | httptape import --fixtures ./fixtures
 ```
 
+### migrate-fixtures
+
+Migrate fixtures from v0.11 format (base64-encoded bodies with `body_encoding` field) to v0.12 format (Content-Type-driven body shape).
+
+```bash
+httptape migrate-fixtures [--recursive] <dir>
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--recursive` | `false` | Recurse into subdirectories |
+
+The migration tool:
+- Reads each `.json` file in `<dir>`
+- Skips non-tape JSON files (files that don't parse as valid Tape objects)
+- Decodes base64-encoded bodies using the legacy `body_encoding` field
+- Re-serializes the tape with the new Content-Type-aware body shape
+- Removes the `body_encoding` field
+- Prints a summary of migrated, skipped, and errored files
+
+The tool is idempotent: running it on already-migrated fixtures produces the same output.
+
+**Examples:**
+
+```bash
+# Migrate a flat fixtures directory
+httptape migrate-fixtures ./fixtures
+
+# Migrate recursively (e.g., route-based subdirectories)
+httptape migrate-fixtures --recursive ./fixtures
+
+# Migrate example project fixtures
+httptape migrate-fixtures --recursive ./examples/java-spring-boot/src/test/resources/fixtures/
+```
+
 ## Exit codes
 
 | Code | Meaning |

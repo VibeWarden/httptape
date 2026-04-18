@@ -28,7 +28,7 @@
             "properties": {
               "type": {
                 "type": "string",
-                "enum": ["method", "path", "body_fuzzy"],
+                "enum": ["method", "path", "body_fuzzy", "content_negotiation"],
                 "description": "Criterion type name. Must match a supported Criterion.Name() value."
               },
               "paths": {
@@ -55,7 +55,7 @@
               },
               {
                 "if": {
-                  "properties": { "type": { "enum": ["method", "path"] } },
+                  "properties": { "type": { "enum": ["method", "path", "content_negotiation"] } },
                   "required": ["type"]
                 },
                 "then": {

@@ -304,10 +304,6 @@ func (r *Recorder) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 	}
 
-	// Detect body encodings based on Content-Type headers.
-	reqBodyEncoding := detectBodyEncoding(req.Header.Get("Content-Type"))
-	respBodyEncoding := detectBodyEncoding(resp.Header.Get("Content-Type"))
-
 	// Apply body truncation if maxBodySize is set.
 	var reqTruncated, respTruncated bool
 	var reqOrigSize, respOrigSize int64
@@ -338,7 +334,6 @@ func (r *Recorder) RoundTrip(req *http.Request) (*http.Response, error) {
 		Headers:          req.Header.Clone(),
 		Body:             reqBody,
 		BodyHash:         BodyHashFromBytes(reqBody),
-		BodyEncoding:     reqBodyEncoding,
 		Truncated:        reqTruncated,
 		OriginalBodySize: reqOrigSize,
 	}
@@ -346,7 +341,6 @@ func (r *Recorder) RoundTrip(req *http.Request) (*http.Response, error) {
 		StatusCode:       resp.StatusCode,
 		Headers:          resp.Header.Clone(),
 		Body:             respBody,
-		BodyEncoding:     respBodyEncoding,
 		Truncated:        respTruncated,
 		OriginalBodySize: respOrigSize,
 	}
@@ -373,8 +367,6 @@ func (r *Recorder) roundTripSSE(req *http.Request, resp *http.Response, reqBody 
 	var mu sync.Mutex
 	var events []SSEEvent
 
-	reqBodyEncoding := detectBodyEncoding(req.Header.Get("Content-Type"))
-
 	// Apply body truncation to request body if configured.
 	var reqTruncated bool
 	var reqOrigSize int64
@@ -394,7 +386,6 @@ func (r *Recorder) roundTripSSE(req *http.Request, resp *http.Response, reqBody 
 		Headers:          req.Header.Clone(),
 		Body:             reqBody,
 		BodyHash:         BodyHashFromBytes(reqBody),
-		BodyEncoding:     reqBodyEncoding,
 		Truncated:        reqTruncated,
 		OriginalBodySize: reqOrigSize,
 	}

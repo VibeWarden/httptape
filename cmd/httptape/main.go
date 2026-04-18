@@ -5,15 +5,18 @@
 //
 // Commands:
 //
-//	httptape serve    — Replay recorded fixtures as a mock HTTP server
-//	httptape record   — Proxy requests to upstream, record and sanitize responses
-//	httptape proxy    — Forward to upstream with L1/L2 fallback-to-cache
-//	httptape export   — Export fixtures to a tar.gz bundle
-//	httptape import   — Import fixtures from a tar.gz bundle
+//	httptape serve             — Replay recorded fixtures as a mock HTTP server
+//	httptape record            — Proxy requests to upstream, record and sanitize responses
+//	httptape proxy             — Forward to upstream with L1/L2 fallback-to-cache
+//	httptape export            — Export fixtures to a tar.gz bundle
+//	httptape import            — Import fixtures from a tar.gz bundle
+//	httptape migrate-fixtures  — Migrate fixtures from v0.11 to v0.12 format
 package main
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -24,6 +27,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -62,11 +66,12 @@ Usage:
   httptape <command> [flags]
 
 Commands:
-  serve    Replay recorded fixtures as a mock HTTP server
-  record   Proxy requests to upstream, record and sanitize responses
-  proxy    Forward to upstream with L1/L2 fallback-to-cache
-  export   Export fixtures to a tar.gz bundle
-  import   Import fixtures from a tar.gz bundle
+  serve              Replay recorded fixtures as a mock HTTP server
+  record             Proxy requests to upstream, record and sanitize responses
+  proxy              Forward to upstream with L1/L2 fallback-to-cache
+  export             Export fixtures to a tar.gz bundle
+  import             Import fixtures from a tar.gz bundle
+  migrate-fixtures   Migrate fixtures from v0.11 to v0.12 format
 
 Run 'httptape <command> -h' for details on a specific command.
 `
@@ -100,6 +105,8 @@ func run(args []string) int {
 		err = runExport(cmdArgs)
 	case "import":
 		err = runImport(cmdArgs)
+	case "migrate-fixtures":
+		err = runMigrateFixtures(cmdArgs)
 	default:
 		fmt.Fprintf(os.Stderr, "httptape: unknown command %q\n\n", cmd)
 		fmt.Fprint(os.Stderr, usageText)
@@ -676,5 +683,277 @@ func runImport(args []string) error {
 		return fmt.Errorf("import: %w", err)
 	}
 
+	return nil
+}
+
+// legacyTapeEnvelope is used during migration to detect and decode the legacy
+// body_encoding field from v0.11 fixtures. The new format determines body
+// representation from Content-Type, so body_encoding is removed on migration.
+type legacyTapeEnvelope struct {
+	ID         string          `json:"id"`
+	Route      string          `json:"route"`
+	RecordedAt json.RawMessage `json:"recorded_at"`
+	Request    json.RawMessage `json:"request"`
+	Response   json.RawMessage `json:"response"`
+	Metadata   json.RawMessage `json:"metadata,omitempty"`
+}
+
+// legacyEndpoint extracts body_encoding from a legacy request or response JSON.
+type legacyEndpoint struct {
+	BodyEncoding string `json:"body_encoding"`
+}
+
+// migrateLegacyFixture reads a v0.11 fixture (which may have body_encoding
+// fields) and returns the re-serialized v0.12 content. It handles the case
+// where bodies were base64-encoded regardless of Content-Type in the old format.
+func migrateLegacyFixture(data []byte) ([]byte, error) {
+	// First, check if this has legacy body_encoding fields that need
+	// special handling. Parse the raw envelope to inspect sub-objects.
+	var env legacyTapeEnvelope
+	if err := json.Unmarshal(data, &env); err != nil {
+		return nil, fmt.Errorf("parse envelope: %w", err)
+	}
+
+	// Check for legacy body_encoding in request and response.
+	hasLegacy := false
+	var reqLE, respLE legacyEndpoint
+	if len(env.Request) > 0 {
+		_ = json.Unmarshal(env.Request, &reqLE)
+		if reqLE.BodyEncoding != "" {
+			hasLegacy = true
+		}
+	}
+	if len(env.Response) > 0 {
+		_ = json.Unmarshal(env.Response, &respLE)
+		if respLE.BodyEncoding != "" {
+			hasLegacy = true
+		}
+	}
+
+	if hasLegacy {
+		// For legacy fixtures with body_encoding=base64, we need to pre-decode
+		// the body before the new UnmarshalJSON runs, because the new code uses
+		// Content-Type to decide how to interpret string bodies, but legacy
+		// fixtures always stored as base64 regardless of Content-Type.
+		data = removeLegacyBodyEncodingAndDecodeBody(data, reqLE.BodyEncoding, respLE.BodyEncoding)
+	}
+
+	// Now unmarshal with the new Tape type (custom UnmarshalJSON handles
+	// the body based on Content-Type).
+	var tape httptape.Tape
+	if err := json.Unmarshal(data, &tape); err != nil {
+		return nil, fmt.Errorf("unmarshal tape: %w", err)
+	}
+
+	if tape.ID == "" || tape.Request.Method == "" {
+		return nil, fmt.Errorf("not a valid tape (missing id or method)")
+	}
+
+	out, err := json.MarshalIndent(tape, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("marshal tape: %w", err)
+	}
+	return append(out, '\n'), nil
+}
+
+// removeLegacyBodyEncodingAndDecodeBody modifies the raw JSON to:
+// 1. Remove body_encoding fields
+// 2. For base64-encoded bodies with non-JSON Content-Types, decode the body
+//    and replace it with the appropriate representation so the new
+//    UnmarshalJSON interprets it correctly.
+func removeLegacyBodyEncodingAndDecodeBody(data []byte, reqEncoding, respEncoding string) []byte {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return data
+	}
+
+	if req, ok := raw["request"]; ok {
+		raw["request"] = fixLegacyEndpoint(req, reqEncoding)
+	}
+	if resp, ok := raw["response"]; ok {
+		raw["response"] = fixLegacyEndpoint(resp, respEncoding)
+	}
+
+	out, err := json.Marshal(raw)
+	if err != nil {
+		return data
+	}
+	return out
+}
+
+// fixLegacyEndpoint removes body_encoding from an endpoint JSON object and,
+// when the legacy encoding is "base64" and the Content-Type is textual,
+// decodes the base64 body to a plain string so the new format handles it
+// correctly.
+func fixLegacyEndpoint(raw json.RawMessage, encoding string) json.RawMessage {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return raw
+	}
+
+	// Remove the legacy field.
+	delete(fields, "body_encoding")
+
+	if encoding != "base64" {
+		out, err := json.Marshal(fields)
+		if err != nil {
+			return raw
+		}
+		return out
+	}
+
+	// Get the body value.
+	bodyRaw, ok := fields["body"]
+	if !ok || len(bodyRaw) == 0 || string(bodyRaw) == "null" {
+		out, err := json.Marshal(fields)
+		if err != nil {
+			return raw
+		}
+		return out
+	}
+
+	// Body should be a JSON string containing base64-encoded data.
+	var b64 string
+	if err := json.Unmarshal(bodyRaw, &b64); err != nil {
+		// Not a string; leave as-is.
+		out, _ := json.Marshal(fields)
+		return out
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		// Invalid base64; leave as-is.
+		out, _ := json.Marshal(fields)
+		return out
+	}
+
+	// Determine Content-Type to decide how to represent the decoded body.
+	ct := extractContentType(fields)
+	mt, parseErr := httptape.ParseMediaType(ct)
+
+	if parseErr == nil && httptape.IsJSON(mt) {
+		// JSON: write as native JSON value.
+		if json.Valid(decoded) {
+			fields["body"] = json.RawMessage(decoded)
+		} else {
+			// Invalid JSON bytes despite JSON CT: re-encode as base64 string.
+			reEncoded, _ := json.Marshal(b64)
+			fields["body"] = json.RawMessage(reEncoded)
+		}
+	} else if parseErr == nil && httptape.IsText(mt) {
+		// Text: write as JSON string.
+		encoded, _ := json.Marshal(string(decoded))
+		fields["body"] = json.RawMessage(encoded)
+	} else {
+		// Binary or unknown: keep as base64 string (the new format's convention).
+		// Already a base64 string, so leave bodyRaw as-is.
+	}
+
+	out, _ := json.Marshal(fields)
+	return out
+}
+
+// extractContentType reads the Content-Type from a headers field within a
+// request or response JSON object.
+func extractContentType(fields map[string]json.RawMessage) string {
+	headersRaw, ok := fields["headers"]
+	if !ok {
+		return ""
+	}
+	var headers map[string][]string
+	if err := json.Unmarshal(headersRaw, &headers); err != nil {
+		return ""
+	}
+	// http.Header uses canonical form, but JSON fixtures may vary.
+	for k, v := range headers {
+		if strings.EqualFold(k, "content-type") && len(v) > 0 {
+			return v[0]
+		}
+	}
+	return ""
+}
+
+func runMigrateFixtures(args []string) error {
+	fs := flag.NewFlagSet("httptape migrate-fixtures", flag.ContinueOnError)
+	recursive := fs.Bool("recursive", false, "Recurse into subdirectories")
+
+	if err := fs.Parse(args); err != nil {
+		return &usageError{err}
+	}
+
+	dir := fs.Arg(0)
+	if dir == "" {
+		fs.Usage()
+		return &usageError{fmt.Errorf("<dir> argument is required")}
+	}
+
+	// Resolve to absolute path for consistent logging.
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return fmt.Errorf("resolve path: %w", err)
+	}
+
+	info, err := os.Stat(absDir)
+	if err != nil {
+		return fmt.Errorf("stat directory: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s is not a directory", absDir)
+	}
+
+	var migrated, skipped, errored int
+
+	walkFn := func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			logger.Printf("walk error: %s: %v", path, walkErr)
+			errored++
+			return nil // continue walking
+		}
+
+		if d.IsDir() {
+			// If not recursive, skip subdirectories (but not the root).
+			if !*recursive && path != absDir {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		if filepath.Ext(path) != ".json" {
+			return nil
+		}
+
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			logger.Printf("skip (read error): %s: %v", path, readErr)
+			errored++
+			return nil
+		}
+
+		out, migrateErr := migrateLegacyFixture(data)
+		if migrateErr != nil {
+			logger.Printf("skip (not a tape): %s", path)
+			skipped++
+			return nil
+		}
+
+		if writeErr := os.WriteFile(path, out, 0644); writeErr != nil {
+			logger.Printf("error (write): %s: %v", path, writeErr)
+			errored++
+			return nil
+		}
+
+		migrated++
+		return nil
+	}
+
+	if walkErr := filepath.WalkDir(absDir, walkFn); walkErr != nil {
+		return fmt.Errorf("walk directory: %w", walkErr)
+	}
+
+	logger.Printf("migrate-fixtures: %d migrated, %d skipped, %d errors", migrated, skipped, errored)
+
+	if errored > 0 {
+		return fmt.Errorf("%d files had errors during migration", errored)
+	}
 	return nil
 }

@@ -550,10 +550,9 @@ func TestServer_ReplayBinaryBody(t *testing.T) {
 		Method: "GET",
 		URL:    "/image.png",
 	}, RecordedResp{
-		StatusCode:   200,
-		Headers:      http.Header{"Content-Type": {"image/png"}},
-		Body:         binaryData,
-		BodyEncoding: BodyEncodingBase64,
+		StatusCode: 200,
+		Headers:    http.Header{"Content-Type": {"image/png"}},
+		Body:       binaryData,
 	})
 	if err := store.Save(context.Background(), tape); err != nil {
 		t.Fatalf("save tape: %v", err)

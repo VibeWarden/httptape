@@ -53,9 +53,10 @@ type MatcherConfig struct {
 // Type-specific fields are validated based on the Type value.
 //
 // Currently supported types:
-//   - "method":     matches on HTTP method (no type-specific fields)
-//   - "path":       matches on URL path (no type-specific fields)
-//   - "body_fuzzy": matches on specific JSON body fields (requires Paths)
+//   - "method":              matches on HTTP method (no type-specific fields)
+//   - "path":                matches on URL path (no type-specific fields)
+//   - "body_fuzzy":          matches on specific JSON body fields (requires Paths)
+//   - "content_negotiation": matches request Accept against response Content-Type (no type-specific fields)
 type CriterionConfig struct {
 	Type  string   `json:"type"`
 	Paths []string `json:"paths,omitempty"`
@@ -240,9 +241,10 @@ type criterionBuilder struct {
 // criterionBuilders maps criterion type names to their builder definitions.
 // Each entry corresponds to a supported Criterion.Name() value.
 var criterionBuilders = map[string]criterionBuilder{
-	"method":     {validate: validateMethodCriterion, build: buildMethodCriterion},
-	"path":       {validate: validatePathCriterion, build: buildPathCriterion},
-	"body_fuzzy": {validate: validateBodyFuzzyCriterion, build: buildBodyFuzzyCriterion},
+	"method":               {validate: validateMethodCriterion, build: buildMethodCriterion},
+	"path":                 {validate: validatePathCriterion, build: buildPathCriterion},
+	"body_fuzzy":           {validate: validateBodyFuzzyCriterion, build: buildBodyFuzzyCriterion},
+	"content_negotiation":  {validate: validateContentNegotiationCriterion, build: buildContentNegotiationCriterion},
 }
 
 func validateMethodCriterion(cc CriterionConfig) error {
@@ -281,6 +283,17 @@ func validateBodyFuzzyCriterion(cc CriterionConfig) error {
 
 func buildBodyFuzzyCriterion(cc CriterionConfig) (Criterion, error) {
 	return NewBodyFuzzyCriterion(cc.Paths...), nil
+}
+
+func validateContentNegotiationCriterion(cc CriterionConfig) error {
+	if len(cc.Paths) > 0 {
+		return fmt.Errorf("%q does not use \"paths\"", cc.Type)
+	}
+	return nil
+}
+
+func buildContentNegotiationCriterion(_ CriterionConfig) (Criterion, error) {
+	return ContentNegotiationCriterion{}, nil
 }
 
 // BuildMatcher constructs a Matcher from the config's matcher declaration.

@@ -12,8 +12,21 @@
   "response": {
     "status_code": 200,
     "headers": {
-      "Content-Type": ["application/json"]
+      "Content-Type": [
+        "application/json"
+      ]
     },
-    "body": "W3siaWQiOjEsIm5hbWUiOiJBbGljZSBKb2huc29uIiwiZW1haWwiOiJhbGljZUBleGFtcGxlLmNvbSJ9LHsiaWQiOjIsIm5hbWUiOiJCb2IgU21pdGgiLCJlbWFpbCI6ImJvYkBleGFtcGxlLmNvbSJ9XQ=="
+    "body": [
+      {
+        "id": 1,
+        "name": "Alice Johnson",
+        "email": "alice@example.com"
+      },
+      {
+        "id": 2,
+        "name": "Bob Smith",
+        "email": "bob@example.com"
+      }
+    ]
   }
 }

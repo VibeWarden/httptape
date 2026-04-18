@@ -12,8 +12,29 @@
   "response": {
     "status_code": 200,
     "headers": {
-      "Content-Type": ["application/json"]
+      "Content-Type": [
+        "application/json"
+      ]
     },
-    "body": "W3siaWQiOjEsIm5hbWUiOiJXaXJlbGVzcyBLZXlib2FyZCIsInByaWNlIjo0OS45NSwiZGVzY3JpcHRpb24iOiJDb21wYWN0IHdpcmVsZXNzIGtleWJvYXJkIHdpdGggY3VzdG9taXphYmxlIFJHQiBiYWNrbGlnaHQgYW5kIGxvdy1wcm9maWxlIG1lY2hhbmljYWwgc3dpdGNoZXMifSx7ImlkIjoyLCJuYW1lIjoiVVNCLUMgSHViIiwicHJpY2UiOjM0LjUwLCJkZXNjcmlwdGlvbiI6IjctaW4tMSBVU0ItQyBodWIgd2l0aCA0SyBIRE1JLCAxMDBXIHBhc3N0aHJvdWdoIGNoYXJnaW5nLCBhbmQgU0QgY2FyZCByZWFkZXIifSx7ImlkIjozLCJuYW1lIjoiTm9pc2UtQ2FuY2VsbGluZyBIZWFkcGhvbmVzIiwicHJpY2UiOjEyOS45NSwiZGVzY3JpcHRpb24iOiJPdmVyLWVhciBoZWFkcGhvbmVzIHdpdGggaHlicmlkIGFjdGl2ZSBub2lzZSBjYW5jZWxsYXRpb24gYW5kIDMwLWhvdXIgYmF0dGVyeSBsaWZlIn1d"
+    "body": [
+      {
+        "id": 1,
+        "name": "Wireless Keyboard",
+        "price": 49.95,
+        "description": "Compact wireless keyboard with customizable RGB backlight and low-profile mechanical switches"
+      },
+      {
+        "id": 2,
+        "name": "USB-C Hub",
+        "price": 34.50,
+        "description": "7-in-1 USB-C hub with 4K HDMI, 100W passthrough charging, and SD card reader"
+      },
+      {
+        "id": 3,
+        "name": "Noise-Cancelling Headphones",
+        "price": 129.95,
+        "description": "Over-ear headphones with hybrid active noise cancellation and 30-hour battery life"
+      }
+    ]
   }
 }

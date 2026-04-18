@@ -485,6 +485,81 @@ func (c *BodyFuzzyCriterion) Score(req *http.Request, candidate Tape) int {
 // Name returns "body_fuzzy".
 func (c *BodyFuzzyCriterion) Name() string { return "body_fuzzy" }
 
+// ContentNegotiationCriterion selects tapes whose response Content-Type
+// satisfies the incoming request's Accept header, following RFC 7231
+// section 5.3.2 media range matching with specificity-based scoring.
+//
+// Scoring:
+//   - Exact type/subtype match:     5
+//   - Subtype wildcard match:       4
+//   - Full wildcard (*/*) match:    3
+//   - No match:                     0
+//
+// When the request has no Accept header, it is treated as Accept: */*
+// (per RFC 7231 section 5.3.2). When a candidate tape has no response
+// Content-Type header, it is treated as application/octet-stream.
+//
+// If the Accept header contains multiple media ranges, the criterion
+// uses the highest-specificity range that matches the candidate's
+// Content-Type, weighted by q-value. Media ranges with q=0 explicitly
+// exclude the Content-Type.
+//
+// Note: using both ContentNegotiationCriterion and HeadersCriterion with
+// Key="Accept" in the same CompositeMatcher is allowed but almost certainly
+// redundant. ContentNegotiationCriterion performs RFC 7231 media-range
+// matching against the response Content-Type, while HeadersCriterion
+// performs exact string matching on the request header. They test different
+// things and their scores add independently.
+type ContentNegotiationCriterion struct{}
+
+// Score returns 3-5 if the candidate's response Content-Type satisfies the
+// request's Accept header, 0 otherwise.
+func (ContentNegotiationCriterion) Score(req *http.Request, candidate Tape) int {
+	// Parse Accept header from request.
+	acceptStr := req.Header.Get("Accept")
+	acceptRanges := ParseAccept(acceptStr)
+
+	// Parse Content-Type from candidate's response.
+	ctStr := ""
+	if candidate.Response.Headers != nil {
+		ctStr = candidate.Response.Headers.Get("Content-Type")
+	}
+	var ct MediaType
+	if ctStr == "" {
+		ct = MediaType{Type: "application", Subtype: "octet-stream"}
+	} else {
+		var err error
+		ct, err = ParseMediaType(ctStr)
+		if err != nil {
+			return 0 // malformed Content-Type: cannot match
+		}
+	}
+
+	// First pass: check q=0 exclusions. Per RFC 7231, q=0 means the media
+	// type is explicitly not acceptable, regardless of other ranges.
+	for _, ar := range acceptRanges {
+		if ar.QValue == 0 && MatchesMediaRange(ar, ct) {
+			return 0
+		}
+	}
+
+	// Second pass: find the best matching range (sorted by q desc, specificity desc).
+	for _, ar := range acceptRanges {
+		if ar.QValue == 0 {
+			continue
+		}
+		if MatchesMediaRange(ar, ct) {
+			// Map specificity to score: exact=5, subtype-wildcard=4, full-wildcard=3.
+			return Specificity(ar) + 2
+		}
+	}
+
+	return 0 // no range matched
+}
+
+// Name returns "content_negotiation".
+func (ContentNegotiationCriterion) Name() string { return "content_negotiation" }
+
 // CompositeMatcher evaluates a list of Criterion implementations against
 // candidate tapes and returns the highest-scoring match. If all criteria
 // return a positive score for a candidate, the candidate's total score is
@@ -493,14 +568,15 @@ func (c *BodyFuzzyCriterion) Name() string { return "body_fuzzy" }
 //
 // Score weight table for built-in criteria:
 //
-//	MethodCriterion:      1
-//	PathCriterion:        2
-//	RouteCriterion:       1
-//	PathRegexCriterion:   1
-//	HeadersCriterion:     3
-//	QueryParamsCriterion: 4
-//	BodyFuzzyCriterion:   6
-//	BodyHashCriterion:    8
+//	MethodCriterion:               1
+//	PathCriterion:                 2
+//	RouteCriterion:                1
+//	PathRegexCriterion:            1
+//	HeadersCriterion:              3
+//	QueryParamsCriterion:          4
+//	ContentNegotiationCriterion:   3-5
+//	BodyFuzzyCriterion:            6
+//	BodyHashCriterion:             8
 //
 // The original design (ADR-4) used powers-of-two-ish weights so each
 // higher-specificity criterion dominates all lower ones combined. Later

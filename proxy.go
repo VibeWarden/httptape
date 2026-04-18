@@ -397,24 +397,18 @@ func (p *Proxy) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 	}
 
-	// 6. Detect body encodings.
-	reqBodyEncoding := detectBodyEncoding(req.Header.Get("Content-Type"))
-	respBodyEncoding := detectBodyEncoding(resp.Header.Get("Content-Type"))
-
-	// 7. Build raw tape.
+	// 6. Build raw tape.
 	recordedReq := RecordedReq{
-		Method:       req.Method,
-		URL:          req.URL.String(),
-		Headers:      req.Header.Clone(),
-		Body:         reqBody,
-		BodyHash:     BodyHashFromBytes(reqBody),
-		BodyEncoding: reqBodyEncoding,
+		Method:   req.Method,
+		URL:      req.URL.String(),
+		Headers:  req.Header.Clone(),
+		Body:     reqBody,
+		BodyHash: BodyHashFromBytes(reqBody),
 	}
 	recordedResp := RecordedResp{
-		StatusCode:   resp.StatusCode,
-		Headers:      resp.Header.Clone(),
-		Body:         respBody,
-		BodyEncoding: respBodyEncoding,
+		StatusCode: resp.StatusCode,
+		Headers:    resp.Header.Clone(),
+		Body:       respBody,
 	}
 
 	rawTape := NewTape(p.route, recordedReq, recordedResp)
@@ -492,15 +486,12 @@ func (p *Proxy) roundTripSSE(req *http.Request, resp *http.Response, reqBody []b
 	startTime := time.Now()
 	respHeaders := resp.Header.Clone()
 
-	reqBodyEncoding := detectBodyEncoding(req.Header.Get("Content-Type"))
-
 	recordedReq := RecordedReq{
-		Method:       req.Method,
-		URL:          req.URL.String(),
-		Headers:      req.Header.Clone(),
-		Body:         reqBody,
-		BodyHash:     BodyHashFromBytes(reqBody),
-		BodyEncoding: reqBodyEncoding,
+		Method:   req.Method,
+		URL:      req.URL.String(),
+		Headers:  req.Header.Clone(),
+		Body:     reqBody,
+		BodyHash: BodyHashFromBytes(reqBody),
 	}
 
 	var mu sync.Mutex

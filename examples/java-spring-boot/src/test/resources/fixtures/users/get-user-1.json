@@ -12,8 +12,14 @@
   "response": {
     "status_code": 200,
     "headers": {
-      "Content-Type": ["application/json"]
+      "Content-Type": [
+        "application/json"
+      ]
     },
-    "body": "eyJpZCI6MSwibmFtZSI6IkFsaWNlIEpvaG5zb24iLCJlbWFpbCI6ImFsaWNlQGV4YW1wbGUuY29tIn0="
+    "body": {
+      "id": 1,
+      "name": "Alice Johnson",
+      "email": "alice@example.com"
+    }
   }
 }
