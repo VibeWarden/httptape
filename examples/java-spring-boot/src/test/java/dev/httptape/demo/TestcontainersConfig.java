@@ -3,6 +3,7 @@ package dev.httptape.demo;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.Arrays;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -14,6 +15,7 @@ import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
 import org.springframework.test.context.DynamicPropertyRegistrar;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.wait.strategy.Wait;
+import org.testcontainers.images.builder.ImageFromDockerfile;
 import org.testcontainers.utility.MountableFile;
 
 /**
@@ -32,6 +34,13 @@ import org.testcontainers.utility.MountableFile;
  *
  * <p>Integration tests import this configuration via
  * {@code @Import(TestcontainersConfig.class)}.
+ *
+ * <p><strong>Build-from-source note:</strong> The container currently builds
+ * httptape from source so the demo always exercises the matcher code in this
+ * checkout. This is needed while PR #191 (v0.12.0 content-type awareness) is
+ * in flight — the migrated fixture format is not readable by older published
+ * images. Once v0.12.0 ships to GHCR, swap back to
+ * {@code ghcr.io/vibewarden/httptape:0.12.0}.
  */
 @TestConfiguration(proxyBeanMethods = false)
 class TestcontainersConfig {
@@ -40,10 +49,19 @@ class TestcontainersConfig {
      * A single httptape container serving every {@code .json} fixture found
      * on the classpath under {@code fixtures/**}. Realtime SSE timing for a
      * realistic streaming experience.
+     *
+     * <p>Builds httptape from source (repo root) so the demo exercises the
+     * matcher code in this checkout. Once v0.12.0 ships to GHCR, swap back
+     * to {@code ghcr.io/vibewarden/httptape:0.12.0}.
      */
     @Bean
     GenericContainer<?> httptapeContainer() throws IOException {
-        GenericContainer<?> container = new GenericContainer<>("ghcr.io/vibewarden/httptape:0.10.1")
+        Path repoRoot = Paths.get("../..").toAbsolutePath().normalize();
+        ImageFromDockerfile httptapeImage = new ImageFromDockerfile("httptape-test", false)
+                .withFileFromPath(".", repoRoot)
+                .withFileFromPath("Dockerfile", repoRoot.resolve("Dockerfile"));
+
+        GenericContainer<?> container = new GenericContainer<>(httptapeImage)
                 .withCommand("serve", "--fixtures", "/fixtures", "--sse-timing=realtime")
                 .withExposedPorts(8081)
                 .waitingFor(Wait.forHttp("/").forStatusCode(404));

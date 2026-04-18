@@ -1,6 +1,11 @@
 services:
   httptape:
-    image: ghcr.io/vibewarden/httptape:0.10.1
+    # Builds httptape from source so the demo exercises the matcher code in
+    # this checkout. Once v0.12.0 ships to GHCR, swap back to:
+    #   image: ghcr.io/vibewarden/httptape:0.12.0
+    build:
+      context: ../..
+      dockerfile: Dockerfile
     command: ["serve", "--fixtures", "/fixtures", "--sse-timing=realtime"]
     volumes:
       # All fixtures must be in a single flat directory for FileStore.
