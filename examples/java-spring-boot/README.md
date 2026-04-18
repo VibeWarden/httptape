@@ -17,9 +17,9 @@ UserService ---------+-----> httptape (REST)    |
                      +--------------------------+
 ```
 
-Two httptape containers in tests (one per test class):
+One shared httptape container across all test classes (via `TestcontainersConfig`):
 
-| Container | Fixtures | What it proves |
+| Test class | Fixtures used | What it proves |
 |---|---|---|
 | `RecommendationServiceIntegrationTest` | `fixtures/openai/` | Spring AI streaming chat completions replayed from an SSE fixture in OpenAI's exact wire format |
 | `UserServiceIntegrationTest` | `fixtures/users/` | Classic REST `GET` requests replayed from JSON fixtures |
@@ -28,13 +28,13 @@ Two httptape containers in tests (one per test class):
 
 ### Headline: deterministic LLM streaming tests
 
-The `RecommendationService` uses Spring AI's `ChatClient` to call an LLM via the OpenAI chat completions API. In tests, `@DynamicPropertySource` overrides `spring.ai.openai.base-url` to point at an httptape Testcontainer. httptape serves a pre-recorded SSE fixture in OpenAI's exact wire format -- every `data:` frame is a valid `chat.completion.chunk` JSON object, ending with the `[DONE]` sentinel.
+The `RecommendationService` uses Spring AI's `ChatClient` to call an LLM via the OpenAI chat completions API. In tests, `@Import(TestcontainersConfig.class)` brings in a shared httptape container that overrides `spring.ai.openai.base-url` via a `DynamicPropertyRegistrar` bean. httptape serves a pre-recorded SSE fixture in OpenAI's exact wire format -- every `data:` frame is a valid `chat.completion.chunk` JSON object, ending with the `[DONE]` sentinel.
 
-Spring AI's `OpenAiApi` appends `/v1/chat/completions` to the base URL. The fixture's request URL is `/v1/chat/completions`. No custom `@Configuration` or `@TestConfiguration` classes needed -- Spring AI's auto-configuration reads the overridden properties and constructs everything correctly.
+Spring AI's `OpenAiApi` appends `/v1/chat/completions` to the base URL. The fixture's request URL is `/v1/chat/completions`. The `TestcontainersConfig` handles all property wiring -- Spring AI's auto-configuration reads the overridden properties and constructs everything correctly.
 
 ### Secondary: classic REST integration tests
 
-The `UserService` uses Spring's `RestClient` to fetch user data from an external REST API. Same pattern: `@DynamicPropertySource` overrides the base URL, httptape serves recorded JSON fixtures.
+The `UserService` uses Spring's `RestClient` to fetch user data from an external REST API. Same pattern: the shared `TestcontainersConfig` overrides the base URL, httptape serves recorded JSON fixtures.
 
 The story: **one tool, one test approach, both integration shapes.**
 
@@ -67,6 +67,18 @@ For local development and manual testing, use the test-time runner. It boots the
 Or in IntelliJ: right-click `TestApplication.main()` -> Run/Debug. Set breakpoints in `RecommendationService` / `UserService` and step through the streaming + REST flows interactively.
 
 The app starts with a real httptape container in the background. Exit the app to tear down the container.
+
+## Faster local tests with Testcontainers reuse
+
+Testcontainers can keep containers running between `./mvnw test` invocations on your local machine, dramatically speeding up the test cycle. This is opt-in per developer (CI must NOT enable it -- containers should always be ephemeral on CI):
+
+```bash
+echo "testcontainers.reuse.enable=true" >> ~/.testcontainers.properties
+```
+
+One-time setup. Subsequent test runs reuse the same httptape container, dropping startup overhead from ~2s to near-zero per run. Combined with the shared `TestcontainersConfig` (one container per JVM, not per test class), the integration test cycle stays snappy even as more test classes are added.
+
+Why per-developer and not project-shipped? Testcontainers deliberately requires `reuse.enable` to live in `~/.testcontainers.properties` (not the classpath) -- it's a local-dev convenience that would be unsafe in CI, where every build must start clean.
 
 ## Try it standalone
 
@@ -121,7 +133,7 @@ java-spring-boot/
       RecommendationServiceIntegrationTest.java  # 2 tests: content + cadence
       UserServiceIntegrationTest.java            # 3 tests: happy, list, 404
       TestApplication.java               # Dev runner (spring-boot:test-run)
-      TestcontainersConfig.java          # Shared Testcontainers config for dev runner
+      TestcontainersConfig.java          # Shared Testcontainers config (tests + dev runner)
     test/resources/fixtures/
       openai/
         chat-completion-headphones.json  # SSE fixture (OpenAI wire format)

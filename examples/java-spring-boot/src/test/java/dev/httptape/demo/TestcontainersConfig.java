@@ -8,16 +8,17 @@ import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.utility.MountableFile;
 
 /**
- * Testcontainers configuration for the dev runner ({@link TestApplication}).
+ * Shared Testcontainers configuration for the dev runner ({@link TestApplication})
+ * and all integration tests.
  *
  * <p>Strategy: a single httptape container with all fixtures (OpenAI + users)
  * copied into one flat {@code /fixtures} directory. Both the Spring AI ChatClient
  * and the REST UserService point at the same container. This keeps startup fast
- * and simple -- architectural purity is not the goal of a dev runner.
+ * and simple -- one container per JVM, not per test class.
  *
- * <p>This configuration is <em>not</em> used by the integration tests. Each test
- * class manages its own {@code @Container static} lifecycle, scoped to its own
- * fixture subset. The two code paths are intentionally independent.
+ * <p>Integration tests import this configuration via
+ * {@code @Import(TestcontainersConfig.class)}. The container is started once and
+ * shared across all test classes within the same Spring application context.
  */
 @TestConfiguration(proxyBeanMethods = false)
 class TestcontainersConfig {

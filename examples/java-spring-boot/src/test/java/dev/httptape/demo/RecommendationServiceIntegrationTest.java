@@ -3,13 +3,7 @@ package dev.httptape.demo;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.test.context.DynamicPropertyRegistry;
-import org.springframework.test.context.DynamicPropertySource;
-import org.testcontainers.containers.GenericContainer;
-import org.testcontainers.containers.wait.strategy.Wait;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
-import org.testcontainers.utility.MountableFile;
+import org.springframework.context.annotation.Import;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -23,33 +17,13 @@ import static org.junit.jupiter.api.Assertions.*;
  * Testcontainers. Proves that Spring AI streaming chat completions can be tested
  * deterministically with pre-recorded OpenAI SSE fixtures.
  *
- * <p>The httptape container serves fixtures with {@code --sse-timing=realtime},
- * preserving the original inter-event timing from the recording.
+ * <p>The shared httptape container (from {@link TestcontainersConfig}) serves
+ * fixtures with {@code --sse-timing=realtime}, preserving the original
+ * inter-event timing from the recording.
  */
 @SpringBootTest
-@Testcontainers
+@Import(TestcontainersConfig.class)
 class RecommendationServiceIntegrationTest {
-
-    @Container
-    static final GenericContainer<?> httptape = new GenericContainer<>(
-            "ghcr.io/vibewarden/httptape:0.10.1"
-    )
-            .withCommand("serve", "--fixtures", "/fixtures", "--sse-timing=realtime")
-            .withExposedPorts(8081)
-            .withCopyFileToContainer(
-                    MountableFile.forClasspathResource("fixtures/openai/"),
-                    "/fixtures/"
-            )
-            .waitingFor(Wait.forHttp("/").forStatusCode(404));
-
-    @DynamicPropertySource
-    static void overrideProperties(DynamicPropertyRegistry registry) {
-        // Spring AI's OpenAiApi appends /v1/chat/completions to this base URL.
-        // httptape serves the fixture when it matches POST /v1/chat/completions.
-        registry.add("spring.ai.openai.base-url", () ->
-                "http://" + httptape.getHost() + ":" + httptape.getMappedPort(8081));
-        registry.add("spring.ai.openai.api-key", () -> "sk-test-key");
-    }
 
     @Autowired
     private RecommendationService recommendationService;

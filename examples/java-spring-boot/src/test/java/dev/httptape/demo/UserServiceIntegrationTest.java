@@ -3,13 +3,7 @@ package dev.httptape.demo;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.test.context.DynamicPropertyRegistry;
-import org.springframework.test.context.DynamicPropertySource;
-import org.testcontainers.containers.GenericContainer;
-import org.testcontainers.containers.wait.strategy.Wait;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
-import org.testcontainers.utility.MountableFile;
+import org.springframework.context.annotation.Import;
 
 import java.util.List;
 import java.util.Optional;
@@ -20,28 +14,13 @@ import static org.junit.jupiter.api.Assertions.*;
  * Integration tests for {@link UserService} using httptape served via
  * Testcontainers. Demonstrates the classic REST integration testing pattern:
  * pre-recorded fixtures replayed deterministically.
+ *
+ * <p>Uses the shared httptape container from {@link TestcontainersConfig},
+ * which serves all fixtures (OpenAI + users) from a single container.
  */
 @SpringBootTest
-@Testcontainers
+@Import(TestcontainersConfig.class)
 class UserServiceIntegrationTest {
-
-    @Container
-    static final GenericContainer<?> httptape = new GenericContainer<>(
-            "ghcr.io/vibewarden/httptape:0.10.1"
-    )
-            .withCommand("serve", "--fixtures", "/fixtures")
-            .withExposedPorts(8081)
-            .withCopyFileToContainer(
-                    MountableFile.forClasspathResource("fixtures/users/"),
-                    "/fixtures/"
-            )
-            .waitingFor(Wait.forHttp("/").forStatusCode(404));
-
-    @DynamicPropertySource
-    static void overrideProperties(DynamicPropertyRegistry registry) {
-        registry.add("app.external-api.base-url", () ->
-                "http://" + httptape.getHost() + ":" + httptape.getMappedPort(8081));
-    }
 
     @Autowired
     private UserService userService;
