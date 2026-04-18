@@ -216,8 +216,26 @@ client := &http.Client{Transport: rec}
 // Use client normally...
 ```
 
+## Recorder vs CachingTransport
+
+The `Recorder` is a record-only primitive: it always forwards to upstream and captures the response. It does not replay cached responses.
+
+If you need cache-through-upstream behavior (replay on hit, record on miss), use `CachingTransport` instead. CachingTransport is the replay+record sibling of Recorder.
+
+| Feature | Recorder | CachingTransport |
+|---------|----------|-----------------|
+| Record traffic | Yes | Yes (on cache miss) |
+| Replay from cache | No | Yes (on cache hit) |
+| Single-flight dedup | No | Yes |
+| Stale fallback | No | Yes (opt-in) |
+| Async writes | Yes (default) | No (synchronous) |
+| Sampling | Yes | No |
+
+See [CachingTransport](caching-transport.md) for the full guide.
+
 ## See also
 
+- [CachingTransport](caching-transport.md) -- replay+record caching RoundTripper
 - [Redaction](sanitization.md) -- configure what gets redacted
 - [Storage](storage.md) -- where tapes are stored
 - [Config](config.md) -- declarative sanitizer configuration

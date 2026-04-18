@@ -265,8 +265,15 @@ proxy := httptape.NewProxy(l1, l2, httptape.WithProxySanitizer(sanitizer))
 
 `Proxy` is safe for concurrent use by multiple goroutines. `RoundTrip` may be called from multiple goroutines simultaneously.
 
+## CachingTransport
+
+The `Proxy` type internally composes a `CachingTransport` for the L2+upstream path. If you need a simpler, single-store caching `http.RoundTripper` without the L1/L2 split, use `CachingTransport` directly. It supports single-flight deduplication, stale-fallback, SSE tee recording, and sanitize-on-write -- the same core features as Proxy but in a lighter package.
+
+See [CachingTransport](caching-transport.md) for the full guide.
+
 ## See also
 
+- [CachingTransport](caching-transport.md) -- single-store caching RoundTripper for library embedding
 - [Recording](recording.md) -- one-shot recording without fallback
 - [Replay](replay.md) -- offline replay from fixtures
 - [Redaction](sanitization.md) -- configuring the redaction pipeline

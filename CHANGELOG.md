@@ -4,6 +4,36 @@ All notable changes to httptape are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.13.0] - 2026-04-18
+
+### Added
+
+- **CachingTransport**: New `http.RoundTripper` that provides transparent,
+  store-backed caching. On cache hit, returns the recorded response without
+  contacting upstream. On cache miss, forwards to upstream, records the
+  response (with optional sanitization), and returns it. This is the library
+  primitive for cache-through-upstream logic. (#202)
+- `NewCachingTransport(upstream, store, opts...)` constructor with functional
+  options pattern.
+- `CachingOption` type with 10 option functions: `WithCacheMatcher`,
+  `WithCacheSanitizer`, `WithCacheFilter`, `WithCacheSingleFlight`,
+  `WithCacheMaxBodySize`, `WithCacheRoute`, `WithCacheOnError`,
+  `WithCacheSSERecording`, `WithCacheUpstreamDownFallback`,
+  `WithCacheUpstreamTimeout`.
+- **Single-flight deduplication**: Concurrent identical cache misses share a
+  single upstream call (stdlib-only implementation, no external dependencies).
+- **Stale-fallback policy** (`WithCacheUpstreamDownFallback`): When upstream
+  is unreachable and a cached tape exists, returns it with
+  `X-Httptape-Stale: true` header. Opt-in, disabled by default. (#164)
+- **Upstream timeout** (`WithCacheUpstreamTimeout`): Configurable deadline for
+  upstream requests on cache miss. On timeout, the stale-fallback path is
+  entered (if enabled).
+- **SSE tee recording**: SSE responses on the miss path are streamed to the
+  caller unchanged while events are accumulated and persisted. Partial
+  disconnects (client close before upstream EOF) are detected and the
+  partial tape is discarded.
+- `docs/caching-transport.md`: Complete guide for CachingTransport.
+
 ## [0.12.0] - 2026-04-18
 
 ### Breaking Changes
