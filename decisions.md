@@ -11286,3 +11286,26 @@ Dispatch plan: #178 and #179 can be architected in parallel. #180 waits for #179
   - 5 open questions flagged for the architect: (1) Kotest BehaviorSpec vs FunSpec, (2) Koog tool HTTP client idiom, (3) multi-module vs single-module Gradle, (4) matcher config file location and container mount path, (5) SSE fixture authoring strategy for tool-call deltas.
   - Parallel structure to #167 (Java demo). References #178, #179, #180 for the matcher stack.
   - Status comment posted: `READY_FOR_ARCH`.
+
+### 2026-04-18 — Combined Content-Type awareness cycle (v0.12.0)
+
+**User decision:** combine #187 (Content-Type-driven body field) and #188 (ContentNegotiationCriterion) into a single cycle.
+
+**Rationale:**
+- Both features share a common **MediaType parsing/classification utility** (parse media types, classify as JSON/text/binary, parse Accept headers with q-values). Building this utility once and consuming it from both layers avoids duplication and ensures consistent behavior.
+- Both touch **fixtures** — #187 migrates the body format; #188 adds new multi-Content-Type fixtures for content negotiation tests. One fixture migration pass is cleaner than two.
+- Both touch the same **docs** (`docs/matching.md`, `docs/fixtures-authoring.md`).
+- Single coherent **v0.12.0 release narrative**: "better fixture authoring + smart content negotiation as the same Content-Type-aware idea applied at two layers."
+- Both are **pre-1.0 breaking changes** — one atomic breaking change is less disruptive than two sequential ones.
+- One ADR, one PR, one shared `mediaType.go` helper.
+
+**Actions taken:**
+- **Closed #188** with a redirect comment pointing to the revised #187.
+- **Revised #187** — new title: `feat(tape): Content-Type-driven body field + ContentNegotiationCriterion (v0.12.0)`. Full revised spec covering both layers (body shape + content negotiation) plus shared MediaType utility. 24 acceptance criteria, 8 open questions for the architect.
+- **Created `breaking-change` label** (color `#B60205`, description "Pre-1.0 breaking change to public API or fixture format"). Applied to #187.
+- **Added `milestone:4-advanced-matching` label** to #187 (content negotiation is an advanced matching feature).
+- **Status comment posted** on #187: `READY_FOR_ARCH`. Queued for after PR #186 merges.
+
+**Key design pivot from original #187:** the original spec used escaped JSON strings for JSON bodies (e.g., `"body": "{\"model\":\"gpt-4o-mini\",...}"`). The revised spec uses **native JSON objects** (e.g., `"body": {"model": "gpt-4o-mini", ...}`), making the `body` field truly polymorphic: its JSON type (object, string, or base64 string) is determined by the Content-Type header. This is a more ambitious but significantly better DX outcome.
+
+**No open questions from the PM.** All 8 open questions are flagged for the architect.
