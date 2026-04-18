@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/VibeWarden/httptape/config.schema.json",
-  "title": "httptape sanitization config",
-  "description": "Declarative configuration for httptape's sanitization pipeline. Maps to the Go API: RedactHeaders, RedactBodyPaths, FakeFields.",
+  "title": "httptape config",
+  "description": "Declarative configuration for httptape's sanitization pipeline and matcher composition. Maps to the Go API: RedactHeaders, RedactBodyPaths, FakeFields, CompositeMatcher.",
   "type": "object",
   "required": ["version", "rules"],
   "additionalProperties": false,
@@ -12,10 +12,66 @@
       "const": "1",
       "description": "Config schema version. Must be \"1\"."
     },
+    "matcher": {
+      "type": "object",
+      "description": "Optional matcher configuration for the replay server. Declares which criteria the CompositeMatcher uses to select recorded tapes.",
+      "required": ["criteria"],
+      "additionalProperties": false,
+      "properties": {
+        "criteria": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Ordered list of matching criteria. Each entry declares a criterion type and its type-specific fields.",
+          "items": {
+            "type": "object",
+            "required": ["type"],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": ["method", "path", "body_fuzzy"],
+                "description": "Criterion type name. Must match a supported Criterion.Name() value."
+              },
+              "paths": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^\\$\\..+",
+                  "minLength": 3
+                },
+                "minItems": 1,
+                "description": "JSONPath-like paths for body_fuzzy criterion. Required when type is body_fuzzy."
+              }
+            },
+            "additionalProperties": false,
+            "allOf": [
+              {
+                "if": {
+                  "properties": { "type": { "const": "body_fuzzy" } },
+                  "required": ["type"]
+                },
+                "then": {
+                  "required": ["type", "paths"]
+                }
+              },
+              {
+                "if": {
+                  "properties": { "type": { "enum": ["method", "path"] } },
+                  "required": ["type"]
+                },
+                "then": {
+                  "properties": {
+                    "paths": false
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
     "rules": {
       "type": "array",
-      "minItems": 1,
-      "description": "Ordered list of sanitization rules. Applied sequentially to each recorded tape.",
+      "description": "Ordered list of sanitization rules. Applied sequentially to each recorded tape. May be empty when a matcher is configured.",
       "items": {
         "type": "object",
         "required": ["action"],

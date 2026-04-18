@@ -803,3 +803,104 @@ func TestIntegration_SSE_Proxy_E2E(t *testing.T) {
 		t.Errorf("fallback should contain cached events, got: %q", string(fallbackBody))
 	}
 }
+
+// TestIntegration_ConfigDrivenMatcher_BodyFuzzy tests the full config-driven
+// matcher flow: two fixtures at POST /v1/chat/completions are distinguished
+// by body content using a body_fuzzy criterion loaded from a Config.
+// This is end-to-end validation for the Kotlin/Koog demo use case.
+func TestIntegration_ConfigDrivenMatcher_BodyFuzzy(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := t.Context()
+
+	// Tape 1: single user message.
+	tape1 := NewTape("chat", RecordedReq{
+		Method:  "POST",
+		URL:     "https://api.openai.com/v1/chat/completions",
+		Headers: http.Header{"Content-Type": {"application/json"}},
+		Body:    []byte(`{"model":"gpt-4","messages":[{"role":"user","content":"hello"}]}`),
+	}, RecordedResp{
+		StatusCode: 200,
+		Headers:    http.Header{"Content-Type": {"application/json"}},
+		Body:       []byte(`{"id":"resp-1","choices":[{"message":{"role":"assistant","content":"Hi there!"}}]}`),
+	})
+	if err := store.Save(ctx, tape1); err != nil {
+		t.Fatalf("save tape1: %v", err)
+	}
+
+	// Tape 2: multi-turn conversation with tool call.
+	tape2 := NewTape("chat", RecordedReq{
+		Method:  "POST",
+		URL:     "https://api.openai.com/v1/chat/completions",
+		Headers: http.Header{"Content-Type": {"application/json"}},
+		Body:    []byte(`{"model":"gpt-4","messages":[{"role":"user","content":"search"},{"role":"assistant","content":"searching..."},{"role":"tool","content":"results"}]}`),
+	}, RecordedResp{
+		StatusCode: 200,
+		Headers:    http.Header{"Content-Type": {"application/json"}},
+		Body:       []byte(`{"id":"resp-2","choices":[{"message":{"role":"assistant","content":"Found results."}}]}`),
+	})
+	if err := store.Save(ctx, tape2); err != nil {
+		t.Fatalf("save tape2: %v", err)
+	}
+
+	// Build matcher from config using method + path + body_fuzzy.
+	cfg := &Config{
+		Version: "1",
+		Matcher: &MatcherConfig{
+			Criteria: []CriterionConfig{
+				{Type: "method"},
+				{Type: "path"},
+				{Type: "body_fuzzy", Paths: []string{"$.messages[*].role"}},
+			},
+		},
+		Rules: []Rule{},
+	}
+
+	matcher, err := cfg.BuildMatcher()
+	if err != nil {
+		t.Fatalf("BuildMatcher: %v", err)
+	}
+
+	// Start server with the config-driven matcher.
+	srv := NewServer(store, WithMatcher(matcher))
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	// Request 1: single user message — should match tape1.
+	req1Body := `{"model":"gpt-4","messages":[{"role":"user","content":"different content"}]}`
+	resp1, err := http.Post(ts.URL+"/v1/chat/completions", "application/json",
+		strings.NewReader(req1Body))
+	if err != nil {
+		t.Fatalf("POST request 1: %v", err)
+	}
+	body1, _ := io.ReadAll(resp1.Body)
+	resp1.Body.Close()
+
+	if resp1.StatusCode != 200 {
+		t.Errorf("request 1 status = %d, want 200", resp1.StatusCode)
+	}
+	if !strings.Contains(string(body1), "resp-1") {
+		t.Errorf("request 1 body = %q, want to contain %q", string(body1), "resp-1")
+	}
+
+	// Request 2: multi-turn with tool — should match tape2.
+	req2Body := `{"model":"gpt-4","messages":[{"role":"user","content":"other query"},{"role":"assistant","content":"thinking..."},{"role":"tool","content":"other results"}]}`
+	resp2, err := http.Post(ts.URL+"/v1/chat/completions", "application/json",
+		strings.NewReader(req2Body))
+	if err != nil {
+		t.Fatalf("POST request 2: %v", err)
+	}
+	body2, _ := io.ReadAll(resp2.Body)
+	resp2.Body.Close()
+
+	if resp2.StatusCode != 200 {
+		t.Errorf("request 2 status = %d, want 200", resp2.StatusCode)
+	}
+	if !strings.Contains(string(body2), "resp-2") {
+		t.Errorf("request 2 body = %q, want to contain %q", string(body2), "resp-2")
+	}
+
+	// Verify they got different responses (not both hitting the same tape).
+	if string(body1) == string(body2) {
+		t.Error("both requests returned the same response; body_fuzzy matching did not distinguish them")
+	}
+}

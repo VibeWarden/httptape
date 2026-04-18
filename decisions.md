@@ -9695,6 +9695,492 @@ All other criteria remain infallible at construction time:
 
 ---
 
+
+### ADR-39: Declarative matcher composition via JSON config
+
+**Date**: 2026-04-18
+**Issue**: #180
+**Status**: Accepted
+
+#### Context
+
+Container consumers (Java/Kotlin/TS demos that pull the published Docker image) cannot
+configure the httptape server's matcher beyond the hardcoded `DefaultMatcher()` (method +
+path only). The upcoming Kotlin + Ktor + Koog agent demo requires body-aware matching to
+distinguish multiple LLM calls to `POST /v1/chat/completions` that share the same method,
+path, and headers, differing only in the `messages` JSON body array.
+
+Per-criterion CLI flags (`--match-body-fuzzy`) were rejected by the PM because they do not
+compose and lead to flag explosion as more criteria are added. The `Config` struct in
+`config.go` already provides a versioned, JSON-Schema-validated declarative configuration
+surface for sanitization rules. The `--config` flag already exists on `httptape serve`
+(line 157 of `main.go`) but is currently unused by the serve command. Extending `Config`
+with an optional `matcher` field reuses all existing infrastructure: parsing, validation,
+schema, and loading.
+
+This ADR builds on ADR-38 (issue #179), which promoted `MatchCriterion` from a function
+type to a `Criterion` interface with `Score()` and `Name()` methods. The `Name()` method
+on each criterion struct provides the registry key for config-driven dispatch.
+
+#### Decision
+
+##### Config struct extension
+
+Add an optional top-level `Matcher` field to `Config`:
+
+```go
+// Config represents a declarative configuration for httptape.
+// It can be loaded from JSON or constructed programmatically.
+type Config struct {
+    Version string         `json:"version"`
+    Matcher *MatcherConfig `json:"matcher,omitempty"`
+    Rules   []Rule         `json:"rules"`
+}
+```
+
+The field is a pointer to `MatcherConfig` (not a value) so that `omitempty` works correctly
+and `nil` vs zero-value is distinguishable. When `Matcher` is nil (field absent from JSON),
+`BuildMatcher()` returns `DefaultMatcher()` -- no behavior change.
+
+`Rules` remains required per the existing schema (`"required": ["version", "rules"]`).
+However, `Validate()` must be updated to allow empty `Rules` when `Matcher` is present,
+since a config file used purely for matcher composition (no sanitization) should be valid.
+This is a relaxation: config files that only declare `matcher` and have `"rules": []` become
+valid, while the existing behavior (rules-only configs) is unchanged.
+
+**Correction on Rules requirement**: On further consideration, the simplest backward-
+compatible approach is to keep `rules` required in the JSON schema (callers must pass
+`"rules": []` at minimum) but relax the Go-side validation to allow an empty rules array
+when a matcher is configured. This avoids changing the JSON schema's `required` array and
+minimizes blast radius. Config files that only need matcher composition write `"rules": []`
+explicitly -- a minor inconvenience that keeps the schema stable.
+
+##### MatcherConfig type
+
+```go
+// MatcherConfig declares the composition of matching criteria for the replay server.
+// It maps to a CompositeMatcher constructed via BuildMatcher.
+type MatcherConfig struct {
+    Criteria []CriterionConfig `json:"criteria"`
+}
+```
+
+##### CriterionConfig type
+
+A single struct with a `Type` discriminator and all possible type-specific fields.
+Only the fields relevant to the given type are populated; irrelevant fields are
+validated as absent.
+
+```go
+// CriterionConfig represents a single matching criterion in the declarative config.
+// The Type field is the discriminator (matches Criterion.Name()).
+// Type-specific fields are validated based on the Type value.
+type CriterionConfig struct {
+    Type  string   `json:"type"`
+    Paths []string `json:"paths,omitempty"`
+}
+```
+
+**Rationale for single-struct approach**: The three deserialization options were:
+
+1. **Single struct with all possible fields, only relevant ones populated per type**
+   (chosen). Cheap, simple, Go-idiomatic for a small number of type-specific fields.
+   Validation enforces that irrelevant fields are not set. Adding a new criterion type
+   that needs a new field means adding one field to `CriterionConfig` and one validation
+   case -- a two-line change plus validation logic.
+
+2. **Type-specific struct per criterion type with custom UnmarshalJSON**. More idiomatic
+   in languages with sum types, but in Go this requires either a wrapper struct with
+   `json.RawMessage` and a manual dispatch, or a custom `UnmarshalJSON` on the slice.
+   The code volume is significantly higher for the same result, and it creates N types
+   instead of 1.
+
+3. **`map[string]any` for type-specific fields**. Flexible but completely untyped at
+   the Go level. Every field access requires type assertions. Validation becomes manual
+   and error-prone. This is what `Rule.Fields` uses for faker specs (because faker
+   specs have high type diversity with 12+ types), but criterion configs have only 1
+   type-specific field today (`paths`), making the cost/benefit of `map[string]any`
+   unfavorable.
+
+The single-struct approach is consistent with how `Rule` works in the existing config:
+one struct with all possible fields, validated per `action` type. As the criterion
+type count grows (future: `pattern` for `path_regex`, `key`/`value` for `headers`,
+`route` for `route`), the struct gains one field each. If the field count ever becomes
+unwieldy (unlikely -- criteria have at most 1-2 config fields each), a refactor to
+option 2 can be done without changing the JSON schema.
+
+##### Initial criterion types supported (scope of #180)
+
+| `type` value | `Name()` match | Type-specific fields | Constructor call |
+|---|---|---|---|
+| `"method"` | `MethodCriterion.Name()` = `"method"` | none | `MethodCriterion{}` |
+| `"path"` | `PathCriterion.Name()` = `"path"` | none | `PathCriterion{}` |
+| `"body_fuzzy"` | `BodyFuzzyCriterion.Name()` = `"body_fuzzy"` | `paths` (required, non-empty) | `NewBodyFuzzyCriterion(paths...)` |
+
+Out of scope for this issue: `path_regex`, `route`, `headers`, `query_params`,
+`body_hash`. These can be added as follow-up issues by extending the dispatch
+table and adding validation for their type-specific fields.
+
+##### Factory function: BuildMatcher
+
+```go
+// BuildMatcher constructs a Matcher from the config's matcher declaration.
+// If no matcher is configured (Matcher field is nil or has no criteria),
+// it returns DefaultMatcher().
+//
+// BuildMatcher validates criterion types and their fields. It returns an error
+// if any criterion type is unknown or required fields are missing/invalid.
+//
+// BuildMatcher assumes the config has been validated via Validate(). However,
+// it performs its own materialization-time checks (e.g., for criteria that
+// require runtime validation beyond shape checks).
+func (c *Config) BuildMatcher() (Matcher, error)
+```
+
+The function constructs a `*CompositeMatcher` from the parsed criteria. It uses a
+dispatch table keyed on the `Type` string:
+
+```go
+// criterionBuilders maps criterion type names to factory functions.
+// Each factory validates type-specific fields and returns the constructed Criterion.
+var criterionBuilders = map[string]func(CriterionConfig) (Criterion, error){
+    "method":     buildMethodCriterion,
+    "path":       buildPathCriterion,
+    "body_fuzzy": buildBodyFuzzyCriterion,
+}
+```
+
+Each builder function validates that only relevant fields are set and required fields
+are present, then constructs the appropriate `Criterion` struct.
+
+Error cases handled by `BuildMatcher`:
+- Unknown criterion type: `fmt.Errorf("matcher: criteria[%d]: unknown type %q", i, cc.Type)`
+- Missing required field: `fmt.Errorf("matcher: criteria[%d]: %q requires non-empty \"paths\"", i, cc.Type)`
+- Irrelevant field set: `fmt.Errorf("matcher: criteria[%d]: %q does not use \"paths\"", i, cc.Type)`
+- Empty criteria array: returns `DefaultMatcher(), nil` (no error, falls back to default)
+
+##### Config.Validate extension
+
+`Validate()` gains matcher validation alongside the existing rule validation:
+
+1. If `c.Matcher` is nil, skip matcher validation (backward compatible).
+2. If `c.Matcher` is non-nil, validate `c.Matcher.Criteria`:
+   - If `Criteria` is empty, produce an error: `"matcher.criteria must be a non-empty array"`.
+   - For each criterion config entry, validate:
+     - `Type` is a recognized value (from `criterionBuilders` keys or a parallel `validCriterionTypes` set).
+     - Type-specific field requirements (e.g., `body_fuzzy` requires non-empty `paths`).
+     - Irrelevant fields are not set (e.g., `method` with `paths` produces an error).
+     - All paths in `paths` are valid JSONPath-like syntax (reuse `parsePath`).
+3. If `c.Matcher` is non-nil, relax the "rules must be non-empty" check: a config
+   with a matcher but empty rules is valid (config used purely for matcher composition).
+   The existing check `if len(c.Rules) == 0` is refined to
+   `if len(c.Rules) == 0 && c.Matcher == nil`.
+
+Validation errors from matcher config are accumulated into the same `errs` slice as
+rule validation errors, following the existing pattern of collecting all errors before
+returning.
+
+The split between `Validate()` and `BuildMatcher()` is intentional:
+- `Validate()` performs shape checks (type recognized, required fields present,
+  irrelevant fields absent, path syntax valid).
+- `BuildMatcher()` performs materialization checks (currently none beyond what
+  `Validate()` covers, but future criteria like `path_regex` would compile the regex
+  here and return a compile error).
+
+##### JSON Schema extension (config.schema.json)
+
+The schema gains a `matcher` property at the top level. The `additionalProperties: false`
+constraint on the root object means we must add `matcher` to the properties map.
+
+```json
+{
+  "matcher": {
+    "type": "object",
+    "description": "Optional matcher configuration for the replay server. Declares which criteria the CompositeMatcher uses to select recorded tapes.",
+    "required": ["criteria"],
+    "additionalProperties": false,
+    "properties": {
+      "criteria": {
+        "type": "array",
+        "minItems": 1,
+        "description": "Ordered list of matching criteria. Each entry declares a criterion type and its type-specific fields.",
+        "items": {
+          "type": "object",
+          "required": ["type"],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": ["method", "path", "body_fuzzy"],
+              "description": "Criterion type name. Must match a supported Criterion.Name() value."
+            },
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^\\$\\..+",
+                "minLength": 3
+              },
+              "minItems": 1,
+              "description": "JSONPath-like paths for body_fuzzy criterion. Required when type is body_fuzzy."
+            }
+          },
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "properties": { "type": { "const": "body_fuzzy" } },
+                "required": ["type"]
+              },
+              "then": {
+                "required": ["type", "paths"]
+              }
+            },
+            {
+              "if": {
+                "properties": { "type": { "enum": ["method", "path"] } },
+                "required": ["type"]
+              },
+              "then": {
+                "properties": {
+                  "paths": false
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}
+```
+
+The `if/then` constructs enforce:
+- `body_fuzzy` requires `paths`.
+- `method` and `path` reject `paths`.
+
+This approach uses `allOf` with `if/then` rather than `oneOf` because the criterion items
+share most of their shape (only `paths` varies), making `oneOf` with three separate sub-schemas
+unnecessarily repetitive. The `if/then` approach is cleaner and extends naturally as new
+criterion types are added.
+
+Additionally, the `rules` field's `minItems: 1` constraint must be removed from the
+JSON schema, since rules can now be empty when a matcher is configured. This aligns
+with the Go-side relaxation of the empty-rules validation.
+
+##### CLI integration in cmd/httptape/main.go
+
+`runServe` changes:
+
+1. **Replace the dead `--config` flag** (currently `_ = fs.String("config", ...)`)
+   with a live variable: `configPath := fs.String("config", "", "Path to httptape config JSON (matcher and sanitization rules)")`.
+
+2. **After flag parsing**, if `*configPath != ""`:
+   a. Load the config: `cfg, err := httptape.LoadConfigFile(*configPath)`.
+   b. Build the matcher: `matcher, err := cfg.BuildMatcher()`.
+   c. Append to server options: `serverOpts = append(serverOpts, httptape.WithMatcher(matcher))`.
+   d. If `cfg.Rules` is non-empty, build the sanitization pipeline too (future-proofing
+      for when serve mode supports sanitization, though currently serve mode does not
+      sanitize). For now, the rules are simply ignored by serve mode -- the config is
+      loaded and validated, but only the matcher portion is consumed.
+
+3. **Remove the TODO comment** ("accepted but not used by serve").
+
+4. **Update `--help` text**: The flag description changes from `"Path to sanitization
+   config JSON (accepted but not used by serve)"` to `"Path to httptape config JSON
+   (matcher and sanitization rules)"`.
+
+5. **Error handling**: Config loading errors and `BuildMatcher` errors are returned
+   as `fmt.Errorf("load config: %w", err)` (consistent with the `runRecord` pattern).
+
+##### Backward compatibility
+
+- **Existing config files** (sanitization-only, no `matcher` field) continue to work
+  unchanged. The `matcher` field is optional (`omitempty` on the Go struct, not in
+  `required` in the JSON schema). `BuildMatcher()` on a config with no matcher returns
+  `DefaultMatcher()`.
+
+- **Existing `serve` invocations** without `--config` are completely unchanged.
+  `DefaultMatcher()` is still the default.
+
+- **`LoadConfig` with `DisallowUnknownFields`**: The existing decoder uses
+  `dec.DisallowUnknownFields()`. Adding the `Matcher` field to `Config` means JSON
+  files containing `"matcher": {...}` will now decode successfully instead of failing
+  with "unknown field". This is the desired behavior. Files without `"matcher"` continue
+  to decode with `Matcher` as `nil`.
+
+- **Record and proxy modes**: these modes already consume `--config` for sanitization
+  only. Adding `Matcher` to `Config` does not break them. `BuildMatcher()` returns
+  `DefaultMatcher()` when matcher config is absent. Record/proxy modes do not call
+  `BuildMatcher()` -- they only call `BuildPipeline()`. No changes to `runRecord` or
+  `runProxy` in this issue.
+
+#### Types
+
+| Type | File | Description |
+|---|---|---|
+| `MatcherConfig` | `config.go` | Declares matcher criteria composition. Contains `Criteria []CriterionConfig`. |
+| `CriterionConfig` | `config.go` | Single criterion declaration with `Type` discriminator and type-specific fields (`Paths`). |
+
+Modified type:
+
+| Type | File | Change |
+|---|---|---|
+| `Config` | `config.go` | New optional field `Matcher *MatcherConfig` |
+
+#### Functions and methods
+
+| Function / Method | Signature | File | Notes |
+|---|---|---|---|
+| `Config.BuildMatcher` | `func (c *Config) BuildMatcher() (Matcher, error)` | `config.go` | New. Constructs `*CompositeMatcher` from config. Returns `DefaultMatcher()` when no matcher configured. |
+| `Config.Validate` | `func (c *Config) Validate() error` | `config.go` | Modified. Adds matcher config validation. Relaxes empty-rules check when matcher is present. |
+
+No new exported package-level functions. The `criterionBuilders` dispatch table and
+individual builder functions (`buildMethodCriterion`, `buildPathCriterion`,
+`buildBodyFuzzyCriterion`) are unexported.
+
+#### File layout
+
+| File | Changes |
+|---|---|
+| `config.go` | Add `MatcherConfig` and `CriterionConfig` types. Add `Matcher *MatcherConfig` field to `Config`. Add `BuildMatcher()` method. Extend `Validate()` with matcher validation. Add `criterionBuilders` dispatch table and builder functions. |
+| `config_test.go` | Add tests for: config with no matcher (backward compat), config with valid matcher, config with unknown criterion type, config with `body_fuzzy` missing `paths`, config with `method` having spurious `paths`, config with empty criteria array, `BuildMatcher` returning `DefaultMatcher` for nil matcher, `BuildMatcher` constructing correct `CompositeMatcher`. |
+| `config.schema.json` | Add `matcher` property with `criteria` array schema. Remove `minItems: 1` from `rules`. Add `if/then` constraints for per-type field validation. |
+| `cmd/httptape/main.go` | Wire `--config` in `runServe`: load config, call `BuildMatcher()`, pass `WithMatcher(matcher)` to `NewServer`. Update flag description. Remove TODO comment. |
+| `cmd/httptape/main_test.go` | Add test: serve with `--config` providing matcher config (write temp config file, verify exit code). Add test: serve with `--config` pointing to invalid config (verify exit code = `exitRuntime`). |
+
+No new files. No changes to `matcher.go`, `server.go`, or any other existing files.
+
+#### Sequence
+
+Request/response flow when `--config` is provided to `httptape serve`:
+
+1. CLI parses `--config <path>` and `--fixtures <dir>`.
+2. `httptape.LoadConfigFile(path)` reads and parses the JSON. `DisallowUnknownFields` ensures no typos. `Validate()` checks version, rules (relaxed for empty when matcher present), and matcher criteria (type recognized, fields valid).
+3. `cfg.BuildMatcher()` iterates `cfg.Matcher.Criteria`, dispatches each to its builder function via `criterionBuilders`, collects `[]Criterion`, returns `NewCompositeMatcher(criteria...)`. If `cfg.Matcher` is nil, returns `DefaultMatcher()`.
+4. `serverOpts = append(serverOpts, httptape.WithMatcher(matcher))`.
+5. `httptape.NewServer(store, serverOpts...)` creates the server with the custom matcher.
+6. Server starts listening. Incoming requests are matched via the `CompositeMatcher` constructed from config.
+
+Request matching at runtime (unchanged from existing `CompositeMatcher` behavior):
+
+1. `Server.ServeHTTP` calls `s.matcher.Match(req, candidates)`.
+2. `CompositeMatcher.Match` iterates candidates, scores each against all criteria.
+3. If any criterion returns 0 for a candidate, that candidate is eliminated.
+4. Highest-scoring surviving candidate is returned.
+
+#### Error cases
+
+| Error | Where | Handling |
+|---|---|---|
+| Config file not found / unreadable | `LoadConfigFile` | Returns `fmt.Errorf("config: open file: %w", err)`. CLI exits with `exitRuntime`. |
+| Malformed JSON | `LoadConfig` | Returns `fmt.Errorf("config: invalid JSON: %w", err)`. |
+| Unknown field in JSON | `LoadConfig` (via `DisallowUnknownFields`) | Returns `fmt.Errorf("config: invalid JSON: %w", err)`. |
+| Unknown criterion type | `Validate` | Error: `"matcher.criteria[N]: unknown type \"foo\""`. |
+| Missing required field (`body_fuzzy` without `paths`) | `Validate` | Error: `"matcher.criteria[N]: \"body_fuzzy\" requires non-empty \"paths\""`. |
+| Irrelevant field set (`method` with `paths`) | `Validate` | Error: `"matcher.criteria[N]: \"method\" does not use \"paths\""`. |
+| Invalid path syntax in `paths` | `Validate` | Error: `"matcher.criteria[N]: \"body_fuzzy\" invalid path syntax: \"bad\""`. |
+| Empty criteria array | `Validate` | Error: `"matcher.criteria must be a non-empty array"`. |
+| BuildMatcher on nil matcher | `BuildMatcher` | Returns `DefaultMatcher(), nil` (not an error). |
+
+All errors from `Validate` are accumulated into a single error message (existing pattern).
+`BuildMatcher` returns the first error encountered (since it performs materialization, not
+shape validation). In practice, if `Validate` passes, `BuildMatcher` should not fail for
+the three criterion types in scope (no materialization-time validation needed). Future
+types like `path_regex` would have `BuildMatcher` return regex compilation errors.
+
+#### Test strategy
+
+All tests use stdlib `testing` only. Table-driven where appropriate.
+
+**`config_test.go` -- new tests:**
+
+1. **`TestLoadConfig_WithMatcher`**: Valid config with matcher + rules. Verify `Config.Matcher` is non-nil, `Criteria` has correct length and types.
+
+2. **`TestLoadConfig_MatcherOnly`**: Config with matcher and empty rules (`"rules": []`). Verify validation passes. This confirms the relaxation of the empty-rules check.
+
+3. **`TestLoadConfig_NoMatcher`**: Existing config without `matcher` field. Verify backward compatibility: `Config.Matcher` is nil, validation passes, `BuildMatcher()` returns a matcher equivalent to `DefaultMatcher()`.
+
+4. **`TestLoadConfig_MatcherValidationErrors`**: Table-driven with cases:
+   - Unknown criterion type -> error contains `"unknown type"`
+   - `body_fuzzy` missing `paths` -> error contains `"requires non-empty \"paths\""`
+   - `body_fuzzy` with empty `paths` array -> error contains `"requires non-empty \"paths\""`
+   - `body_fuzzy` with invalid path syntax -> error contains `"invalid path syntax"`
+   - `method` with spurious `paths` -> error contains `"does not use \"paths\""`
+   - `path` with spurious `paths` -> error contains `"does not use \"paths\""`
+   - Empty criteria array -> error contains `"must be a non-empty array"`
+   - Missing `type` field -> error contains `"unknown type"` (empty string is unknown)
+
+5. **`TestConfig_BuildMatcher_Default`**: `BuildMatcher()` on config with nil matcher returns a valid `Matcher` (not nil). Verify it matches on method + path (same as `DefaultMatcher`).
+
+6. **`TestConfig_BuildMatcher_Composed`**: Config with `method` + `path` + `body_fuzzy` criteria. Build matcher, test against two tapes with same method/path but different bodies. Verify correct tape is selected.
+
+7. **`TestConfig_BuildMatcher_UnknownType`**: `BuildMatcher()` on config with unknown criterion type (that somehow bypassed validation) returns an error. This tests `BuildMatcher`'s own error handling.
+
+**`cmd/httptape/main_test.go` -- new tests:**
+
+8. **`TestServeWithConfig`**: Write a temp config file with matcher config, invoke `run([]string{"serve", "--fixtures", tmpDir, "--config", configPath, "-h"})`, verify exit code is `exitOK`. This verifies the wiring works without actually starting a server.
+
+9. **`TestServeWithInvalidConfig`**: Write a temp config file with invalid JSON, invoke `run(...)`, verify exit code is `exitRuntime`.
+
+**Integration test (in `config_test.go` or `integration_test.go`):**
+
+10. **`TestBuildMatcher_Integration`**: Create two tapes with the same method and path but different JSON bodies. Build a matcher from config with `method` + `path` + `body_fuzzy`. Construct HTTP requests matching each body. Verify the correct tape is returned for each request. This does not start an HTTP server -- it tests `BuildMatcher` output directly against `Match()`.
+
+#### Alternatives considered
+
+1. **Per-criterion CLI flags (`--match-body-fuzzy`)**: Rejected by PM. Does not compose.
+   Each new criterion type would require a new flag with its own semantics. The existing
+   `Config` JSON infrastructure already solves the composition problem.
+
+2. **CriterionConfig with `json.RawMessage` and per-type structs**: More idiomatic for
+   highly polymorphic types, but overkill when there is only one type-specific field
+   (`paths`) across all three initial criterion types. Would require custom
+   `UnmarshalJSON` on the criteria slice and 3+ additional types. The single-struct
+   approach with per-type validation is simpler and equally correct.
+
+3. **CriterionConfig with `map[string]any` for type-specific fields**: Maximum
+   flexibility but zero type safety at the Go level. Every field access requires type
+   assertions. This pattern is used for `Rule.Fields` (faker specs) because there are
+   12+ faker types with diverse field shapes. For criteria (1 optional field today),
+   the overhead of `map[string]any` is not justified.
+
+4. **Named matcher presets (e.g., `"matcher": "body-aware"`)**: Rejected. Too opinionated.
+   The criteria-array approach is composable and gives users full control. Presets could
+   be added as sugar later without changing the underlying mechanism.
+
+#### Consequences
+
+**Benefits:**
+- Container consumers can now configure matcher composition via a JSON config file
+  mounted into the Docker container, without any Go code changes.
+- The `--config` flag on `httptape serve` is no longer a dead flag. It controls both
+  sanitization rules and matcher composition from a single file.
+- Adding new criterion types to the config is a small, well-defined change: add one
+  entry to the `criterionBuilders` dispatch table, one validation case in `Validate()`,
+  and one `enum` value in the JSON schema. This is a two-minute change per criterion type.
+- Criterion types not yet exposed via config (e.g., `path_regex`, `headers`) continue
+  to work in Go code via direct struct construction. The config surface is additive.
+
+**Costs / trade-offs:**
+- The `CriterionConfig` struct will accumulate fields as more criterion types are
+  exposed. This is manageable -- criteria have at most 1-2 config fields each.
+- Config files that only need matcher composition must still include `"rules": []`
+  because `rules` remains a required field in the JSON schema. This is a minor DX
+  inconvenience that preserves backward compatibility.
+- `Validate()` grows more complex with the matcher validation branch. The existing
+  pattern of collecting all errors into `errs []string` scales well.
+
+**Future implications:**
+- Follow-up issues can expose `path_regex` (adds `pattern` field to `CriterionConfig`),
+  `headers` (adds `key`/`value` fields), `route` (adds `route` field), `query_params`
+  (no additional fields), and `body_hash` (no additional fields) by extending the
+  dispatch table and validation logic.
+- If `Config` eventually needs to support record-mode or proxy-mode specific settings,
+  additional optional top-level fields can be added following the same `omitempty`
+  pointer pattern used by `Matcher`.
+
+---
+
 ## PM Log
 
 ### 2026-04-16

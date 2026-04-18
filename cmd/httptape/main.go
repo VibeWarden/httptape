@@ -154,7 +154,7 @@ func runServe(args []string) error {
 	fixtures := fs.String("fixtures", "", "Path to fixture directory (required)")
 	port := fs.Int("port", 8081, "Listen port")
 	fallbackStatus := fs.Int("fallback-status", 404, "HTTP status when no tape matches")
-	_ = fs.String("config", "", "Path to sanitization config JSON (accepted but not used by serve)")
+	configPath := fs.String("config", "", "Path to httptape config JSON (matcher and sanitization rules)")
 	cors := fs.Bool("cors", false, "Enable CORS headers (Access-Control-Allow-Origin: *)")
 	delay := fs.Duration("delay", 0, "Fixed delay before every response (e.g., 200ms, 1s)")
 	errorRate := fs.Float64("error-rate", 0, "Fraction of requests that return 500 (0.0-1.0)")
@@ -178,6 +178,17 @@ func runServe(args []string) error {
 
 	var serverOpts []httptape.ServerOption
 	serverOpts = append(serverOpts, httptape.WithFallbackStatus(*fallbackStatus))
+	if *configPath != "" {
+		cfg, err := httptape.LoadConfigFile(*configPath)
+		if err != nil {
+			return fmt.Errorf("load config: %w", err)
+		}
+		matcher, err := cfg.BuildMatcher()
+		if err != nil {
+			return fmt.Errorf("load config: %w", err)
+		}
+		serverOpts = append(serverOpts, httptape.WithMatcher(matcher))
+	}
 	if *sseTiming != "" {
 		mode, err := parseSSETiming(*sseTiming)
 		if err != nil {
