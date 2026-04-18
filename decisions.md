@@ -14164,6 +14164,754 @@ All tests use stdlib `testing` only. Table-driven where appropriate.
 
 ---
 
+### ADR-44: CachingTransport library API with stale-fallback policy
+
+**Date**: 2026-04-18
+**Issues**: #202, #164
+**Status**: Accepted
+
+#### Context
+
+httptape exposes `Recorder` (forwards + records, no replay) and `Server`
+(replays only, no forward) as library primitives. The `proxy` CLI subcommand
+combines both -- cache by match, fall through on miss -- but that logic
+lives inside the CLI binary, not as a reusable `http.RoundTripper`. Consumers
+embedding httptape as a Go library (e.g., VibeWarden's Caddy-based egress
+proxy, single-binary deployment) need the combined logic exposed as a
+composable standard interface.
+
+Issue #202 defines the CachingTransport API surface. Issue #164 (sibling,
+same v0.13 milestone) defines the edge-case policy for "cache miss + upstream
+down." These are resolved together as a single architectural unit because
+#164's fallback semantics are a CachingTransport implementation concern.
+
+Two primary use cases drive priority:
+
+1. **Zero-cost demo hosting**: record ~50 real LLM responses once, replay
+   infinitely for every demo visitor. Sanitized fixtures committed to repo.
+2. **Egress proxy integration**: record in dev/staging, replay in tests.
+   VibeWarden's single-binary Caddy egress proxy wraps CachingTransport.
+
+#### Decision
+
+##### Resolved open questions
+
+**#202 Q1 -- Naming**: `CachingTransport`. Confirmed. Reads naturally for the
+LLM-cost use case; "replay" is misleading since it also records.
+
+**#202 Q2 -- Store failure during record**: return-and-log. Cache failures
+do not break the user's application. The `onError` callback reports it; the
+response is returned to the caller.
+
+**#202 Q3 -- CLI proxy refactor**: refactor `runProxy` in
+`cmd/httptape/main.go` to instantiate `CachingTransport` internally. Single
+source of truth for cache-through-upstream logic. The Proxy type is preserved
+but its `RoundTrip` delegates to CachingTransport (see CLI Refactor Plan).
+
+**#202 Q4 -- Cache-Control respect**: NO. This is not an RFC 7234 cache; it
+is a tape-match layer. LLM APIs return `no-store` and that is exactly what
+we override. Document prominently in godoc and in `docs/caching-transport.md`.
+
+**#202 Q5 -- Body size limits**: configurable `WithCacheMaxBodySize(n int)`
+(default 10 MiB = 10 * 1024 * 1024). Requests whose body exceeds the limit
+bypass cache entirely (pass through to upstream, response is not recorded).
+This prevents unbounded memory usage from large file uploads.
+
+**#202 Q6 -- TTL / eviction**: NO for v1. Fixtures are conceptually
+immutable. Manual pruning or `migrate-fixtures` if needed.
+
+**#202 Q7 -- Interaction with Recorder**: keep Recorder as the record-only
+primitive (audit use cases where you always want to capture). CachingTransport
+is the replay+record-on-miss sibling. Do not deprecate Recorder.
+
+**#164 Q1 -- Non-SSE cache miss + upstream down**: default behavior is
+transparent error propagation. A connection-refused from upstream returns the
+transport error to the caller. A 5xx from upstream returns the 5xx response.
+Optional stale-fallback behavior (opt-in via `WithCacheUpstreamDownFallback`)
+serves the most-recently-cached response with `X-Httptape-Stale: true` header.
+
+**#164 Q2 -- SSE cache miss + upstream down**: same as non-SSE. If no SSE
+tape is cached, propagate the error. If stale-fallback is enabled and a
+cached SSE tape exists, replay it with `X-Httptape-Stale: true` header. No
+partial-stream synthesis -- either a full cached tape exists or it does not.
+
+**#164 Q3 -- Timeout**: `WithCacheUpstreamTimeout(time.Duration)` defaulting
+to 0 (no timeout -- let the user's transport timeout dominate). When set,
+CachingTransport wraps the request context with a deadline before forwarding
+to upstream. On timeout, the fallback path is entered (same as transport
+error).
+
+##### Type: CachingTransport
+
+```go
+// CachingTransport is an http.RoundTripper that consults a tape Store on
+// each request. On cache hit, it returns the recorded response without
+// contacting upstream. On cache miss, it forwards to upstream, records the
+// response (after sanitization), and returns it.
+//
+// CachingTransport is NOT an RFC 7234 HTTP cache. It does not honor
+// Cache-Control, Vary, or any other HTTP caching headers. It is a
+// tape-match layer: identical requests (as defined by the Matcher) get
+// identical recorded responses.
+//
+// CachingTransport is safe for concurrent use by multiple goroutines.
+type CachingTransport struct {
+    upstream      http.RoundTripper
+    store         Store
+    matcher       Matcher
+    sanitizer     Sanitizer
+    route         string
+    onError       func(error)
+    cacheFilter   func(*http.Response) bool
+    singleFlight  bool
+    maxBodySize   int
+    sseRecording  bool
+
+    // stale-fallback (#164)
+    staleFallback bool
+    upstreamTimeout time.Duration
+
+    // single-flight coordination (stdlib-only)
+    sfMu    sync.Mutex
+    sfCalls map[string]*sfCall
+}
+```
+
+Where `sfCall` is an unexported type for single-flight coordination:
+
+```go
+// sfCall tracks an in-flight upstream request for single-flight dedup.
+type sfCall struct {
+    wg   sync.WaitGroup
+    resp *http.Response  // set before wg.Done
+    err  error           // set before wg.Done
+    body []byte          // buffered response body for sharing
+}
+```
+
+##### Single-flight implementation (stdlib-only)
+
+Manual single-flight using `sync.Mutex` + `map[string]*sfCall`:
+
+```go
+func (ct *CachingTransport) doSingleFlight(key string, fn func() (*http.Response, []byte, error)) (*http.Response, []byte, error) {
+    ct.sfMu.Lock()
+    if call, ok := ct.sfCalls[key]; ok {
+        ct.sfMu.Unlock()
+        call.wg.Wait()
+        // Clone the response for each waiter
+        return cloneResponse(call.resp, call.body), copyBytes(call.body), call.err
+    }
+    call := &sfCall{}
+    call.wg.Add(1)
+    ct.sfCalls[key] = call
+    ct.sfMu.Unlock()
+
+    resp, body, err := fn()
+    call.resp = resp
+    call.body = body
+    call.err = err
+    call.wg.Done()
+
+    ct.sfMu.Lock()
+    delete(ct.sfCalls, key)
+    ct.sfMu.Unlock()
+
+    return resp, body, err
+}
+```
+
+The key is computed from the match dimensions: `method + "|" + path + "|" + bodyHash`.
+This is a ~30-line stdlib-only implementation that avoids the `x/sync/singleflight`
+dependency while providing the same dedup semantics.
+
+Waiters receive a cloned response (fresh `io.ReadCloser` over the same body
+bytes) so each caller gets an independent, consumable response.
+
+##### CachingOption type and constructors
+
+```go
+// CachingOption configures a CachingTransport.
+type CachingOption func(*CachingTransport)
+
+// WithCacheMatcher sets the Matcher used to identify equivalent requests.
+// Default: NewCompositeMatcher(MethodCriterion{}, PathCriterion{}, BodyHashCriterion{}).
+func WithCacheMatcher(m Matcher) CachingOption
+
+// WithCacheSanitizer sets the sanitization pipeline applied to recorded
+// tapes before store persistence. Default: NewPipeline() (no-op).
+func WithCacheSanitizer(s Sanitizer) CachingOption
+
+// WithCacheFilter sets a predicate controlling which upstream responses
+// are cached. Only responses for which fn returns true are persisted.
+// Default: cache 2xx responses only.
+func WithCacheFilter(fn func(*http.Response) bool) CachingOption
+
+// WithCacheSingleFlight controls single-flight deduplication of concurrent
+// cache misses. When true (default), concurrent requests with the same match
+// key share a single upstream call.
+func WithCacheSingleFlight(enabled bool) CachingOption
+
+// WithCacheMaxBodySize sets the maximum request body size in bytes for
+// cache participation. Requests whose body exceeds this limit bypass the
+// cache entirely (forwarded to upstream, response not recorded).
+// Default: 10 MiB (10 * 1024 * 1024).
+// A value of 0 means no limit.
+func WithCacheMaxBodySize(n int) CachingOption
+
+// WithCacheRoute sets the route label applied to all tapes created by
+// this transport.
+func WithCacheRoute(route string) CachingOption
+
+// WithCacheOnError sets a callback invoked when a non-fatal error occurs
+// (store failure, body read failure on the record path). Defaults to no-op.
+func WithCacheOnError(fn func(error)) CachingOption
+
+// WithCacheSSERecording controls whether SSE stream recording is enabled.
+// When true (default), SSE responses on the miss path are tee'd to the
+// caller and accumulated for tape persistence.
+func WithCacheSSERecording(enabled bool) CachingOption
+
+// WithCacheUpstreamDownFallback enables stale-response fallback when
+// upstream is unreachable or returns a transport error on a cache miss.
+// When enabled, CachingTransport searches the store for the best-matching
+// tape (using the configured Matcher) and returns it with an
+// X-Httptape-Stale: true header. When disabled (default), transport errors
+// are propagated to the caller.
+//
+// This is useful for demo hosting (upstream flakiness should not break the
+// demo) but wrong for integration tests (which should see the real failure).
+func WithCacheUpstreamDownFallback(enabled bool) CachingOption
+
+// WithCacheUpstreamTimeout sets a timeout for upstream requests on cache
+// miss. When set, the request context is wrapped with a deadline before
+// forwarding. Default: 0 (no timeout; the caller's http.Client timeout
+// dominates).
+func WithCacheUpstreamTimeout(d time.Duration) CachingOption
+```
+
+##### Constructor
+
+```go
+// NewCachingTransport creates a new CachingTransport wrapping the given
+// upstream transport with store-backed caching.
+//
+// On RoundTrip, it consults the store for a matching tape. On hit, it
+// returns the recorded response. On miss, it forwards to upstream, records
+// the response (after sanitization), and returns it.
+//
+// upstream and store must not be nil. Panics on nil (constructor guard per
+// CLAUDE.md).
+//
+// Default configuration:
+//   - matcher: method + path + body_hash
+//   - sanitizer: no-op Pipeline
+//   - cache filter: 2xx only
+//   - single-flight: enabled
+//   - max body size: 10 MiB
+//   - SSE recording: enabled
+//   - stale fallback: disabled
+//   - upstream timeout: 0 (no timeout)
+//   - route: ""
+//   - onError: no-op
+func NewCachingTransport(upstream http.RoundTripper, store Store, opts ...CachingOption) *CachingTransport
+```
+
+##### RoundTrip flow (non-SSE)
+
+```
+1. Read request body into buffer (respecting maxBodySize).
+   - If body exceeds maxBodySize: restore body on req, pass through to
+     upstream directly (no cache lookup, no recording). Return.
+
+2. Compute body hash from buffer.
+
+3. Replace req.Body with fresh reader over buffer (upstream can consume it).
+
+4. Compute single-flight key: method + "|" + URL.Path + "|" + bodyHash.
+
+5. Cache lookup: store.List(ctx, Filter{Route: route}) -> matcher.Match(req, tapes).
+
+6. HIT: synthesize *http.Response from tape.
+   - For non-SSE tapes: set headers, wrap body in io.NopCloser(bytes.NewReader(body)).
+   - For SSE tapes: use piped body with event replay (same as Proxy.sseResponseFromTape).
+   - Return response with no X-Httptape-Source header (cache hits are transparent).
+
+7. MISS: forward to upstream (with optional single-flight dedup).
+   a. If upstreamTimeout > 0, wrap context with timeout.
+   b. If singleFlight, use doSingleFlight(key, fn). Otherwise call fn directly.
+   c. fn: upstream.RoundTrip(req).
+   d. On transport error:
+      - If staleFallback: search store for best match, return with
+        X-Httptape-Stale: true. If no match, propagate error.
+      - If !staleFallback: propagate error.
+   e. On success:
+      - Read response body into buffer.
+      - Restore response body with fresh reader.
+      - Check cacheFilter(resp). If false, return response without recording.
+      - Build Tape from request + response.
+      - Apply sanitizer.
+      - Store.Save (synchronous). On failure, call onError; still return response.
+      - Return response.
+```
+
+##### SSE tee flow on miss
+
+When the upstream response has `Content-Type: text/event-stream` and SSE
+recording is enabled:
+
+```
+1. Request arrives, cache miss (no matching tape).
+
+2. Upstream returns SSE response (200 with text/event-stream).
+
+3. CachingTransport wraps the upstream response body in an
+   sseRecordingReader (same as Recorder.roundTripSSE). The wrapper:
+
+   a. Tees upstream bytes to the caller via Read().
+   b. Background goroutine parses the tee'd stream into SSEEvents.
+   c. Each parsed event is appended to an in-memory slice.
+
+4. Caller reads response.Body, receiving events as they arrive from
+   upstream (streaming, not buffered).
+
+5. When upstream closes the stream (EOF) or caller closes body:
+   a. The sseRecordingReader's onDone callback fires.
+   b. If the stream was cleanly completed (no error):
+      - Build Tape with SSEEvents.
+      - Apply sanitizer (uses RedactSSEEventData/FakeSSEEventData if
+        configured in the pipeline).
+      - Store.Save.
+   c. If the stream was truncated (client disconnect mid-stream):
+      - Discard the partial tape. Do NOT persist incomplete SSE tapes.
+      - Call onError with a diagnostic message.
+
+6. On subsequent requests with the same match key:
+   a. Cache hit returns the stored SSE tape.
+   b. Response body is a piped stream replaying events with instant
+      timing (SSETimingInstant, same as Proxy fallback default).
+```
+
+Single-flight coordination for SSE misses: the first caller gets the
+live tee'd stream. Concurrent callers with the same key WAIT for the
+first caller's stream to complete, then get the cached tape (replay).
+This is different from non-SSE single-flight (where all waiters get a
+cloned response). Rationale: SSE streams are long-lived; cloning a
+live stream to multiple waiters would require a fan-out implementation
+that is disproportionately complex for v1. The wait-then-replay approach
+is simpler and correct.
+
+##### SSE replay on hit
+
+On cache hit for an SSE tape, CachingTransport synthesizes a response
+using the same `sseResponseFromTape` pattern as Proxy:
+
+```go
+func (ct *CachingTransport) sseResponseFromTape(tape Tape) *http.Response {
+    header := tape.Response.Headers.Clone()
+    header.Set("Content-Type", "text/event-stream")
+    header.Del("Content-Length")
+
+    pr, pw := io.Pipe()
+    go func() {
+        for _, ev := range tape.Response.SSEEvents {
+            if err := writeSSEEvent(pw, ev); err != nil {
+                pw.CloseWithError(err)
+                return
+            }
+        }
+        pw.Close()
+    }()
+
+    return &http.Response{
+        StatusCode: tape.Response.StatusCode,
+        Header:     header,
+        Body:       pr,
+    }
+}
+```
+
+No timing delay on replay -- events are emitted back-to-back (instant).
+This matches the RoundTripper contract (callers expect responses quickly).
+If callers need timing fidelity, they should use the Server (http.Handler)
+which supports SSETimingMode.
+
+##### Stale-fallback implementation (#164)
+
+When `staleFallback` is enabled and an upstream call fails (transport error
+or timeout):
+
+```go
+func (ct *CachingTransport) serveStaleFallback(req *http.Request) (*http.Response, error) {
+    tapes, err := ct.store.List(req.Context(), Filter{Route: ct.route})
+    if err != nil {
+        return nil, fmt.Errorf("httptape: stale fallback store list: %w", err)
+    }
+
+    tape, ok := ct.matcher.Match(req, tapes)
+    if !ok {
+        return nil, nil // no stale match available
+    }
+
+    resp := ct.tapeToResponse(tape)
+    resp.Header.Set("X-Httptape-Stale", "true")
+    return resp, nil
+}
+```
+
+The matcher is the SAME matcher used for the cache lookup. The "most recently
+cached response" is naturally the result of the matcher since the matcher
+picks the best match from the store's current contents. If multiple tapes
+match, the matcher's scoring and ordering rules apply (same as normal cache
+hit).
+
+The `X-Httptape-Stale: true` header signals to callers that the response
+is from a stale cache, not from upstream. This is critical for observability
+(VibeWarden dashboard, demo health indicators).
+
+##### Error-handling matrix
+
+| Failure mode | Caller sees | Notes |
+|---|---|---|
+| Request body exceeds maxBodySize | Upstream response (bypass cache) | No recording |
+| Request body read fails | `error` (wrapped) | Cannot proceed |
+| Store.List fails on cache lookup | Upstream response (miss path) | onError called |
+| Matcher finds no match (cache miss) | Upstream response | Normal miss flow |
+| Upstream transport error (miss) | `error` (propagated) OR stale response if staleFallback | See #164 |
+| Upstream returns non-2xx (filtered) | Upstream response (not cached) | Response returned, not recorded |
+| Upstream response body read fails | Upstream response (partial) | onError called, not cached |
+| Sanitizer fails | Upstream response | onError called, tape not saved |
+| Store.Save fails (record path) | Upstream response | onError called |
+| Single-flight coordination | Cloned response for waiters | Waiters get independent body readers |
+| SSE stream truncated (client disconnect) | Partial stream (no tape persisted) | onError called |
+| SSE upstream error mid-stream | Error propagated on Read() | Partial tape discarded |
+| Store.List fails on stale fallback | `error` (original transport error) | onError called |
+
+##### CachingTransport vs Proxy relationship
+
+CachingTransport is a simpler, single-store primitive:
+- One store (not L1+L2)
+- Single-flight dedup (Proxy has none)
+- No health endpoint
+- Pure RoundTripper (no CLI, no reverse proxy)
+
+Proxy (existing) is a richer, CLI-oriented primitive:
+- L1 (raw/ephemeral) + L2 (sanitized/persistent) two-tier cache
+- Health endpoint surface
+- CLI subcommand integration
+- No single-flight (acceptable for CLI proxy where request volume is lower)
+
+The CLI proxy subcommand can be refactored to compose CachingTransport
+internally. However, the two-tier L1/L2 architecture of Proxy does not
+map directly to CachingTransport's single-store model. Two options:
+
+**Option A -- Proxy wraps CachingTransport for the miss path**: Proxy
+keeps its L1/L2 split but delegates cache-miss-then-upstream to
+CachingTransport (configured with L2 as its store). L1 remains managed
+by Proxy directly. This preserves Proxy's L1/L2 semantics while
+sharing the upstream+record logic.
+
+**Option B -- Refactor Proxy to use CachingTransport as transport**:
+Proxy sets CachingTransport as its `transport` field. CachingTransport
+handles L2 cache lookup + upstream + recording. Proxy adds L1 as a
+fast pre-check. On Proxy.RoundTrip:
+1. Check L1. Hit -> return from L1.
+2. Forward to CachingTransport (which checks L2, then upstream).
+3. On CachingTransport miss-then-upstream-success, Proxy intercepts
+   the response to also save raw to L1.
+
+**Decision**: Option B. CachingTransport is the upstream's transport.
+Proxy wraps it, adding L1 as a pre-check layer and raw-save on success.
+This cleanly reuses CachingTransport's single-flight, body-buffering,
+SSE-tee, and sanitization logic without duplication.
+
+Refactoring steps:
+1. In `NewProxy`, construct a CachingTransport internally:
+   ```go
+   ct := NewCachingTransport(p.transport, p.l2,
+       WithCacheMatcher(p.matcher),
+       WithCacheSanitizer(p.sanitizer),
+       WithCacheRoute(p.route),
+       WithCacheOnError(p.onError),
+   )
+   ```
+2. Proxy.RoundTrip becomes:
+   a. Capture request body (for L1 matching).
+   b. Check L1 cache. Hit -> return from L1 with `X-Httptape-Source: l1-cache`.
+   c. Forward to CachingTransport.RoundTrip.
+   d. On success, save raw tape to L1 (CachingTransport already saved
+      sanitized to L2).
+   e. Return response.
+
+This preserves all existing Proxy behavior:
+- L1 pre-check (raw, fast)
+- L2 handled by CachingTransport
+- Sanitization on L2 only
+- Health endpoint unchanged
+- Fallback: L1 first, L2 (via CachingTransport stale-fallback) second
+- All existing CLI flags, stdout/stderr, exit codes unchanged
+
+##### File layout
+
+**New files:**
+- `caching_transport.go` -- `CachingTransport` struct, `CachingOption` type,
+  all `WithCache*` option functions, `NewCachingTransport`, `RoundTrip`,
+  single-flight implementation, SSE tee/replay helpers, stale-fallback logic.
+- `caching_transport_test.go` -- unit and integration tests.
+- `docs/caching-transport.md` -- user-facing documentation.
+
+**Modified files:**
+- `proxy.go` -- refactor to compose CachingTransport internally. Proxy keeps
+  its public API unchanged. Internal `RoundTrip` delegates to CachingTransport
+  for the L2+upstream path. L1 pre-check remains Proxy-owned.
+- `proxy_test.go` -- existing tests must continue to pass. Add tests
+  verifying CachingTransport composition.
+- `cmd/httptape/main.go` -- no change to `runProxy` flags or behavior. The
+  refactor is internal to the `Proxy` type.
+- `CLAUDE.md` -- add `caching_transport.go` and `caching_transport_test.go`
+  to the package structure table.
+- `CHANGELOG.md` -- add v0.13.0 entry for CachingTransport.
+- `docs/proxy.md` -- cross-reference CachingTransport as the library primitive.
+- `docs/api-reference.md` -- add CachingTransport section.
+- `docs/recording.md` -- mention CachingTransport as the replay+record sibling.
+- `docs/cli.md` -- note that `proxy` subcommand uses CachingTransport internally.
+- `llms.txt`, `llms-full.txt` -- refresh with new surface area.
+
+**Not modified:**
+- `recorder.go` -- not deprecated; remains the record-only primitive.
+- `server.go` -- `serveSSE` stays as-is; CachingTransport uses the
+  `writeSSEEvent` and `sseRecordingReader` helpers from `sse.go` which are
+  already shared.
+- `store.go`, `store_file.go`, `store_memory.go` -- unchanged.
+- `matcher.go` -- unchanged.
+- `sanitizer.go` -- unchanged; `Pipeline.Sanitize` is called as-is.
+- `tape.go` -- unchanged.
+
+#### Types
+
+```go
+// CachingTransport struct (see above for full field list)
+type CachingTransport struct { ... }
+
+// CachingOption functional option type
+type CachingOption func(*CachingTransport)
+
+// sfCall -- unexported single-flight call tracker
+type sfCall struct {
+    wg   sync.WaitGroup
+    resp *http.Response
+    err  error
+    body []byte
+}
+```
+
+#### Functions and methods
+
+```go
+// Constructor
+func NewCachingTransport(upstream http.RoundTripper, store Store, opts ...CachingOption) *CachingTransport
+
+// http.RoundTripper implementation
+func (ct *CachingTransport) RoundTrip(req *http.Request) (*http.Response, error)
+
+// Option functions
+func WithCacheMatcher(m Matcher) CachingOption
+func WithCacheSanitizer(s Sanitizer) CachingOption
+func WithCacheFilter(fn func(*http.Response) bool) CachingOption
+func WithCacheSingleFlight(enabled bool) CachingOption
+func WithCacheMaxBodySize(n int) CachingOption
+func WithCacheRoute(route string) CachingOption
+func WithCacheOnError(fn func(error)) CachingOption
+func WithCacheSSERecording(enabled bool) CachingOption
+func WithCacheUpstreamDownFallback(enabled bool) CachingOption
+func WithCacheUpstreamTimeout(d time.Duration) CachingOption
+
+// Internal methods (unexported)
+func (ct *CachingTransport) doSingleFlight(key string, fn func() (*http.Response, []byte, error)) (*http.Response, []byte, error)
+func (ct *CachingTransport) serveStaleFallback(req *http.Request) (*http.Response, error)
+func (ct *CachingTransport) tapeToResponse(tape Tape) *http.Response
+func (ct *CachingTransport) sseResponseFromTape(tape Tape) *http.Response
+func (ct *CachingTransport) roundTripSSE(req *http.Request, resp *http.Response, reqBody []byte) (*http.Response, error)
+func (ct *CachingTransport) onErrorSafe(err error)
+```
+
+#### Sequence: cache hit (non-SSE)
+
+```
+Client -> CachingTransport.RoundTrip(req)
+  1. Read req.Body into buffer, compute bodyHash
+  2. Restore req.Body with fresh reader
+  3. store.List(ctx, Filter{Route: route})
+  4. matcher.Match(req, tapes) -> tape, true
+  5. Build *http.Response from tape (headers, body, status)
+  6. Return response
+Client <- *http.Response
+```
+
+#### Sequence: cache miss (non-SSE)
+
+```
+Client -> CachingTransport.RoundTrip(req)
+  1. Read req.Body into buffer, compute bodyHash
+  2. Restore req.Body with fresh reader
+  3. store.List(ctx, Filter{Route: route})
+  4. matcher.Match(req, tapes) -> _, false
+  5. Compute singleFlight key: method|path|bodyHash
+  6. [If singleFlight] Enter doSingleFlight(key, fn)
+  7. [If upstreamTimeout > 0] Wrap ctx with deadline
+  8. upstream.RoundTrip(req) -> resp, nil
+  9. Read resp.Body into buffer
+  10. Restore resp.Body with fresh reader
+  11. cacheFilter(resp) -> true
+  12. Build Tape{Request: ..., Response: ...}
+  13. sanitizer.Sanitize(tape) -> sanitizedTape
+  14. store.Save(ctx, sanitizedTape) -> nil [onError if err]
+  15. Return response
+Client <- *http.Response
+```
+
+#### Sequence: cache miss, SSE tee
+
+```
+Client -> CachingTransport.RoundTrip(req)
+  1. Read req.Body into buffer, compute bodyHash
+  2. Restore req.Body, cache lookup -> miss
+  3. upstream.RoundTrip(req) -> resp (Content-Type: text/event-stream)
+  4. Wrap resp.Body in sseRecordingReader(resp.Body, startTime, onEvent, onDone)
+     - onEvent: append SSEEvent to in-memory list
+     - onDone(nil): build Tape with SSEEvents, sanitize, store.Save
+     - onDone(err): discard partial tape, call onError
+  5. Return response with wrapped body
+Client <- *http.Response (streaming)
+  Client reads events as they arrive from upstream
+  When stream completes -> onDone fires -> tape persisted
+```
+
+#### Sequence: cache miss, upstream down, stale fallback
+
+```
+Client -> CachingTransport.RoundTrip(req)
+  1. Read req.Body, compute bodyHash, cache lookup -> miss
+  2. upstream.RoundTrip(req) -> nil, error (connection refused)
+  3. staleFallback == true
+  4. store.List(ctx, Filter{Route: route})
+  5. matcher.Match(req, tapes) -> tape, true
+  6. Build *http.Response from tape
+  7. Set X-Httptape-Stale: true header
+  8. Return response
+Client <- *http.Response (stale, with diagnostic header)
+```
+
+#### Error cases
+
+See error-handling matrix above.
+
+#### Test strategy
+
+**Unit tests (caching_transport_test.go):**
+
+1. **Cache hit -- non-SSE**: pre-populated MemoryStore, request matches ->
+   returns cached response, upstream NOT called.
+2. **Cache hit -- SSE**: pre-populated store with SSE tape, request matches ->
+   returns piped SSE stream, upstream NOT called.
+3. **Cache miss -- non-SSE**: empty store, upstream called, response cached,
+   second identical request returns cached response.
+4. **Cache miss -- SSE tee**: empty store, upstream returns SSE, events tee'd,
+   tape persisted after stream completes.
+5. **Cache miss -- SSE partial disconnect**: client closes body mid-stream,
+   partial tape NOT persisted.
+6. **Upstream error propagation**: upstream returns error, no stale fallback ->
+   error returned to caller.
+7. **Stale fallback -- hit**: upstream error + staleFallback=true +
+   pre-populated store -> stale response with X-Httptape-Stale: true.
+8. **Stale fallback -- miss**: upstream error + staleFallback=true + empty
+   store -> error propagated.
+9. **Cache filter rejects**: upstream returns 500, default filter (2xx only)
+   -> response returned but not cached.
+10. **Sanitization applies**: configure pipeline with RedactHeaders, verify
+    stored tape has redacted headers, original response is unmodified.
+11. **Single-flight dedup**: two goroutines send identical request
+    concurrently on cache miss -> upstream called exactly once.
+12. **MaxBodySize bypass**: request with body > limit -> forwarded without
+    cache interaction.
+13. **Store.Save failure**: mock store fails on Save -> response still
+    returned, onError called.
+14. **Upstream timeout**: WithCacheUpstreamTimeout set, upstream delays ->
+    context deadline exceeded, stale fallback attempted.
+15. **Route filter**: WithCacheRoute("api") set -> only tapes with matching
+    route are considered.
+16. **Concurrent safety**: `go test -race` with multiple goroutines calling
+    RoundTrip with mixed hits/misses.
+
+**Test patterns:**
+- MemoryStore for all store interactions.
+- `httptest.NewServer` for upstream simulation.
+- `RoundTripFunc` adapter for transport injection.
+- Table-driven tests where practical.
+- `testing.T.Parallel()` for independent tests.
+
+**Integration tests (in caching_transport_test.go or integration_test.go):**
+- End-to-end with `http.Client{Transport: ct}` -> httptest upstream ->
+  MemoryStore. Verify: first request hits upstream, second request serves
+  from cache, third request after upstream goes down serves stale (if
+  configured).
+
+#### Alternatives considered
+
+1. **Custom Caddy module for VibeWarden**: rejected because it duplicates
+   httptape's core logic inside a specific framework. CachingTransport is
+   framework-agnostic -- VibeWarden wraps it in Caddy, others wrap it in
+   stdlib, Gin, Echo, etc.
+
+2. **RFC 7234 compliant cache**: rejected because POST requests are
+   uncacheable in RFC 7234. LLM APIs use POST for completions -- the
+   primary use case. httptape is a tape-match layer, not a standards-compliant
+   HTTP cache.
+
+3. **Passthrough Recorder with retroactive match check**: rejected because it
+   always forwards to upstream (defeating the cache-hit zero-cost property).
+   The whole point is to NOT call upstream when a matching tape exists.
+
+4. **Extend existing Proxy with single-flight and single-store mode**: rejected
+   because Proxy's L1/L2 architecture, health endpoint, and CLI integration
+   add complexity that library embedders don't need. CachingTransport is the
+   minimal primitive; Proxy composes it.
+
+5. **External `golang.org/x/sync/singleflight`**: rejected per stdlib-only
+   constraint. The manual implementation is ~30 lines and well-understood.
+
+#### Consequences
+
+**What becomes possible:**
+- VibeWarden single-binary egress proxy with httptape embedded. No sidecar.
+- Zero-cost LLM demo hosting: record 50 responses, replay infinitely.
+- Any Go developer can drop CachingTransport into `http.Client{Transport: ct}`
+  for transparent caching with sanitization.
+- Proxy CLI subcommand shares the same cache-through logic via composition.
+
+**What changes:**
+- Proxy's internal RoundTrip is refactored to delegate to CachingTransport for
+  the L2+upstream path. External behavior is unchanged (same flags, same
+  stdout/stderr, same exit codes).
+- New file `caching_transport.go` added to the package.
+
+**What breaks:**
+- Nothing. Purely additive. All existing types, constructors, options, and CLI
+  commands remain unchanged. Proxy's internal refactor preserves all observable
+  behavior.
+
+**Future implications:**
+- Admin endpoints (#194) can be added to CachingTransport later via a
+  `WithCacheAdminHandler()` option that exposes cache stats and purge
+  endpoints. The design leaves room for this.
+- TTL/eviction can be added via a `WithCacheTTL(time.Duration)` option that
+  filters out expired tapes during cache lookup. The store interface remains
+  unchanged -- TTL is implemented as a client-side filter on `List` results.
+- The Proxy refactor demonstrates that CachingTransport is composable as a
+  building block, not a monolith.
+
+---
+
 
 ## PM Log
 

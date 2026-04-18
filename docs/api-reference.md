@@ -114,6 +114,36 @@ Panics if `store` is nil.
 
 ---
 
+## CachingTransport
+
+```go
+type CachingTransport struct { /* unexported */ }
+
+func NewCachingTransport(upstream http.RoundTripper, store Store, opts ...CachingOption) *CachingTransport
+func (ct *CachingTransport) RoundTrip(req *http.Request) (*http.Response, error) // implements http.RoundTripper
+```
+
+Panics if `upstream` or `store` is nil.
+
+### CachingOption
+
+| Option | Signature | Default |
+|--------|-----------|---------|
+| WithCacheMatcher | `WithCacheMatcher(m Matcher)` | method + path + body_hash |
+| WithCacheSanitizer | `WithCacheSanitizer(s Sanitizer)` | no-op Pipeline |
+| WithCacheFilter | `WithCacheFilter(fn func(*http.Response) bool)` | 2xx only |
+| WithCacheSingleFlight | `WithCacheSingleFlight(enabled bool)` | `true` |
+| WithCacheMaxBodySize | `WithCacheMaxBodySize(n int)` | 10 MiB |
+| WithCacheRoute | `WithCacheRoute(route string)` | `""` |
+| WithCacheOnError | `WithCacheOnError(fn func(error))` | no-op |
+| WithCacheSSERecording | `WithCacheSSERecording(enabled bool)` | `true` |
+| WithCacheUpstreamDownFallback | `WithCacheUpstreamDownFallback(enabled bool)` | `false` |
+| WithCacheUpstreamTimeout | `WithCacheUpstreamTimeout(d time.Duration)` | `0` (no timeout) |
+
+**Details:** [CachingTransport](caching-transport.md)
+
+---
+
 ## Proxy
 
 ```go

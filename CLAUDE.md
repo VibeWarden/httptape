@@ -69,6 +69,8 @@ httptape/
   config.go            # Declarative JSON config for sanitization pipeline
   config_test.go
   config.schema.json   # JSON Schema for config file validation (IDE/CI use)
+  caching_transport.go      # CachingTransport RoundTripper (replay + record-on-miss)
+  caching_transport_test.go
   bundle.go            # Import/export (tar.gz)
   bundle_test.go
   integration_test.go  # End-to-end integration tests

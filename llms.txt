@@ -22,7 +22,8 @@ No manual encoding -- the Content-Type header determines the shape automatically
 - SSETimingMode: sealed interface controlling SSE replay timing (Realtime, Accelerated, Instant)
 - Recorder: http.RoundTripper that records traffic to a Store
 - Server: http.Handler that replays tapes from a Store
-- Proxy: http.RoundTripper with L1/L2 caching and fallback
+- CachingTransport: http.RoundTripper with single-store caching, single-flight dedup, stale fallback
+- Proxy: http.RoundTripper with L1/L2 caching and fallback (separate implementation; unification with CachingTransport planned, see #205)
 - Pipeline: ordered chain of SanitizeFunc transformations (implements Sanitizer)
 - Store: persistence interface (MemoryStore, FileStore, or custom)
 - Matcher: request-to-tape matching (CompositeMatcher with scored criteria)
@@ -85,6 +86,27 @@ SSE timing modes:
 - SSETimingAccelerated(factor): gaps divided by factor
 - SSETimingInstant(): all events emitted immediately
 
+## CachingTransport (cache-through-upstream)
+
+```go
+ct := httptape.NewCachingTransport(http.DefaultTransport, store,
+    httptape.WithCacheSanitizer(sanitizer),
+    httptape.WithCacheUpstreamDownFallback(true),
+)
+client := &http.Client{Transport: ct}
+// HIT: return cached response (upstream not contacted)
+// MISS: forward to upstream, record, return
+// MISS + upstream down + staleFallback: return stale tape (X-Httptape-Stale: true)
+```
+
+Options: WithCacheMatcher, WithCacheSanitizer, WithCacheFilter, WithCacheSingleFlight,
+WithCacheMaxBodySize, WithCacheRoute, WithCacheOnError, WithCacheSSERecording,
+WithCacheUpstreamDownFallback, WithCacheUpstreamTimeout
+
+Single-flight dedup: concurrent identical cache misses share one upstream call.
+SSE tee recording: SSE responses are streamed to caller while events are accumulated
+and persisted. Partial disconnects are detected and discarded.
+
 ## Proxy (fallback-to-cache)
 
 ```go
@@ -97,6 +119,8 @@ proxy := httptape.NewProxy(l1, l2, httptape.WithProxySanitizer(sanitizer))
 X-Httptape-Source header: "l1-cache" or "l2-cache" when serving from cache.
 SSE responses pass through and are cached with per-event timing. L2 fallback
 replays cached SSE events using WithProxySSETiming (default: instant).
+Proxy and CachingTransport share the same conceptual model but are currently
+separate implementations. Unification is planned (see #205).
 
 ## Matching
 
@@ -188,6 +212,7 @@ Matcher criterion types: method, path, body_fuzzy (requires paths), content_nego
 ```go
 func NewRecorder(store Store, opts ...RecorderOption) *Recorder
 func NewServer(store Store, opts ...ServerOption) *Server
+func NewCachingTransport(upstream http.RoundTripper, store Store, opts ...CachingOption) *CachingTransport
 func NewProxy(l1, l2 Store, opts ...ProxyOption) *Proxy
 func NewPipeline(funcs ...SanitizeFunc) *Pipeline
 func NewMemoryStore() *MemoryStore
