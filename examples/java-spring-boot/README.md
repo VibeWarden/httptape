@@ -80,6 +80,14 @@ One-time setup. Subsequent test runs reuse the same httptape container, dropping
 
 Why per-developer and not project-shipped? Testcontainers deliberately requires `reuse.enable` to live in `~/.testcontainers.properties` (not the classpath) -- it's a local-dev convenience that would be unsafe in CI, where every build must start clean.
 
+## A note on virtual threads
+
+The app enables Java 21+ **virtual threads** via `spring.threads.virtual.enabled=true` (Spring Boot 3.2+ config). Tomcat uses a virtual-thread executor — each in-flight HTTP request occupies a virtual thread (JVM-managed, essentially free) instead of an OS thread from the bounded pool.
+
+That makes the `.block()` call in `RecommendationService.recommend()` idiomatic: parking a virtual thread to wait for the LLM stream to complete is the same primitive as subscribing to a Reactor `Mono` — no thread-pool starvation concerns even under heavy concurrent load. Imperative code, reactive scaling.
+
+This is the canonical Spring Boot 4 + Java 25 best practice for blocking-style code in 2026.
+
 ## Try it standalone
 
 ```bash
