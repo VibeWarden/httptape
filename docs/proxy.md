@@ -267,7 +267,7 @@ proxy := httptape.NewProxy(l1, l2, httptape.WithProxySanitizer(sanitizer))
 
 ## CachingTransport
 
-The `Proxy` type internally composes a `CachingTransport` for the L2+upstream path. If you need a simpler, single-store caching `http.RoundTripper` without the L1/L2 split, use `CachingTransport` directly. It supports single-flight deduplication, stale-fallback, SSE tee recording, and sanitize-on-write -- the same core features as Proxy but in a lighter package.
+`Proxy` and `CachingTransport` share the same conceptual model (cache-then-upstream-on-miss), but they are currently separate implementations. `Proxy` manages L1/L2 two-tier caching with its own cache-through-upstream logic, while `CachingTransport` is a standalone single-store primitive with single-flight deduplication, stale-fallback, and SSE tee recording. Unifying the two (Proxy composing CachingTransport internally for L2+upstream) is planned as a follow-up (#205).
 
 See [CachingTransport](caching-transport.md) for the full guide.
 

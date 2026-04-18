@@ -1076,6 +1076,69 @@ func TestCachingTransport_StaleSSEFallback(t *testing.T) {
 	}
 }
 
+func TestCachingTransport_SingleFlightSSEWaiters(t *testing.T) {
+	t.Parallel()
+	store := NewMemoryStore()
+
+	// Create a test SSE upstream that streams events with a small delay.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		flusher, _ := w.(http.Flusher)
+		for i := 0; i < 3; i++ {
+			fmt.Fprintf(w, "data: event-%d\n\n", i)
+			flusher.Flush()
+			time.Sleep(10 * time.Millisecond)
+		}
+	}))
+	defer srv.Close()
+
+	ct := NewCachingTransport(http.DefaultTransport, store,
+		WithCacheSingleFlight(true),
+	)
+
+	const N = 5
+	var wg sync.WaitGroup
+	wg.Add(N)
+	bodies := make([]string, N)
+	errs := make([]error, N)
+
+	// Use a barrier to ensure all goroutines start simultaneously.
+	barrier := make(chan struct{})
+
+	for i := 0; i < N; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			<-barrier
+			req, _ := http.NewRequest("GET", srv.URL+"/stream", nil)
+			resp, err := ct.RoundTrip(req)
+			errs[idx] = err
+			if resp != nil {
+				b, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				bodies[idx] = string(b)
+			}
+		}(i)
+	}
+
+	// Release all goroutines at once.
+	close(barrier)
+	wg.Wait()
+
+	// All callers should succeed and receive all 3 events.
+	for i := 0; i < N; i++ {
+		if errs[i] != nil {
+			t.Errorf("caller %d got error: %v", i, errs[i])
+			continue
+		}
+		for _, ev := range []string{"event-0", "event-1", "event-2"} {
+			if !strings.Contains(bodies[i], ev) {
+				t.Errorf("caller %d body missing %q: %q", i, ev, bodies[i])
+			}
+		}
+	}
+}
+
 func TestCachingTransport_SingleFlightStaleFallbackForWaiters(t *testing.T) {
 	t.Parallel()
 

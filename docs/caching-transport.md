@@ -9,7 +9,7 @@ CachingTransport is the library primitive for cache-through-upstream logic. Use 
 | Use case | Solution |
 |----------|----------|
 | Embed cache-through-upstream in your Go app | **CachingTransport** |
-| Two-tier L1/L2 cache with CLI integration | [Proxy](proxy.md) (composes CachingTransport internally) |
+| Two-tier L1/L2 cache with CLI integration | [Proxy](proxy.md) (separate implementation; unification planned, see #205) |
 | Record-only (audit, capture) | [Recorder](recording.md) |
 | Replay-only (mock server) | [Server](replay.md) |
 
@@ -301,7 +301,7 @@ Non-fatal errors are reported via the `WithCacheOnError` callback. They never af
 | CLI integration | No | Yes (`httptape proxy`) |
 | Use case | Library embedding | CLI-oriented caching proxy |
 
-The CLI `proxy` subcommand composes CachingTransport internally. CachingTransport handles the L2+upstream path, while Proxy adds L1 as a fast pre-check layer.
+CachingTransport and Proxy share the same cache-through-upstream conceptual model, but they are currently separate implementations. CachingTransport is the library primitive for single-store caching; Proxy manages L1/L2 two-tier caching with its own independent logic. Unifying the two paths (Proxy composing CachingTransport for L2+upstream) is planned as a follow-up (#205).
 
 ## Full example: zero-cost demo hosting
 
@@ -359,6 +359,10 @@ func main() {
 ## Thread safety
 
 CachingTransport is safe for concurrent use by multiple goroutines. `RoundTrip` may be called from multiple goroutines simultaneously.
+
+## Known limitations
+
+- **Single-flight waiters do not observe context cancellation.** When single-flight is enabled (default), waiters blocked on a shared upstream call do not exit early if their request context is cancelled. The waiter goroutine remains blocked until the leader's upstream call completes. This is a consequence of using `sync.WaitGroup` (not context-aware) for waiter coordination. To work around this, either disable single-flight (`WithCacheSingleFlight(false)`) or set `WithCacheUpstreamTimeout` to bound the leader's wait.
 
 ## See also
 

@@ -23,7 +23,7 @@ No manual encoding -- the Content-Type header determines the shape automatically
 - Recorder: http.RoundTripper that records traffic to a Store
 - Server: http.Handler that replays tapes from a Store
 - CachingTransport: http.RoundTripper with single-store caching, single-flight dedup, stale fallback
-- Proxy: http.RoundTripper with L1/L2 caching and fallback (composes CachingTransport)
+- Proxy: http.RoundTripper with L1/L2 caching and fallback (separate implementation; unification with CachingTransport planned, see #205)
 - Pipeline: ordered chain of SanitizeFunc transformations (implements Sanitizer)
 - Store: persistence interface (MemoryStore, FileStore, or custom)
 - Matcher: request-to-tape matching (CompositeMatcher with scored criteria)
@@ -135,7 +135,8 @@ proxy := httptape.NewProxy(l1, l2, httptape.WithProxySanitizer(sanitizer))
 X-Httptape-Source header: "l1-cache" or "l2-cache" when serving from cache.
 SSE responses pass through and are cached with per-event timing. L2 fallback
 replays cached SSE events using WithProxySSETiming (default: instant).
-Proxy composes CachingTransport internally for L2+upstream logic.
+Proxy and CachingTransport share the same conceptual model but are currently
+separate implementations. Unification is planned (see #205).
 
 ## Matching
 
@@ -1893,7 +1894,7 @@ proxy := httptape.NewProxy(l1, l2, httptape.WithProxySanitizer(sanitizer))
 
 ## CachingTransport
 
-The `Proxy` type internally composes a `CachingTransport` for the L2+upstream path. If you need a simpler, single-store caching `http.RoundTripper` without the L1/L2 split, use `CachingTransport` directly. It supports single-flight deduplication, stale-fallback, SSE tee recording, and sanitize-on-write -- the same core features as Proxy but in a lighter package.
+`Proxy` and `CachingTransport` share the same conceptual model (cache-then-upstream-on-miss), but they are currently separate implementations. `Proxy` manages L1/L2 two-tier caching with its own cache-through-upstream logic, while `CachingTransport` is a standalone single-store primitive with single-flight deduplication, stale-fallback, and SSE tee recording. Unifying the two (Proxy composing CachingTransport internally for L2+upstream) is planned as a follow-up (#205).
 
 See [CachingTransport](caching-transport.md) for the full guide.
 

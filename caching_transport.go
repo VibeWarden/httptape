@@ -50,6 +50,7 @@ type sfCall struct {
 	resp *http.Response // set before wg.Done
 	err  error          // set before wg.Done
 	body []byte         // buffered response body for sharing
+	sse  bool           // true when the leader's response was SSE
 }
 
 // CachingOption configures a CachingTransport.
@@ -87,6 +88,16 @@ func WithCacheFilter(fn func(*http.Response) bool) CachingOption {
 // WithCacheSingleFlight controls single-flight deduplication of concurrent
 // cache misses. When true (default), concurrent requests with the same match
 // key share a single upstream call.
+//
+// Known limitation: waiters do not observe their request's context cancellation
+// until the leader's upstream call completes. This is a consequence of using
+// sync.WaitGroup (not context-aware) for waiter coordination in v0.13. For
+// callers whose request contexts carry strict deadlines, either disable
+// single-flight (WithCacheSingleFlight(false)) or set an aggressive
+// WithCacheUpstreamTimeout to bound the leader's wait.
+//
+// Disable only if you want "accidentally record multiple variants of the same
+// request" behavior, which is rare.
 func WithCacheSingleFlight(enabled bool) CachingOption {
 	return func(ct *CachingTransport) {
 		ct.singleFlight = enabled
@@ -302,7 +313,15 @@ func (ct *CachingTransport) roundTripWithSingleFlight(req *http.Request, reqBody
 			}
 			return nil, call.err
 		}
-		// Clone the response for each waiter.
+
+		// For SSE responses, the leader's body is a streaming reader that
+		// cannot be cloned. Re-query the store for the persisted tape
+		// instead (the leader's SSE tee writes the tape on stream completion).
+		if call.sse {
+			return ct.reQueryStoreForSSE(req, reqBody)
+		}
+
+		// Clone the response for each waiter (non-SSE path).
 		return cloneResponse(call.resp, call.body), nil
 	}
 
@@ -330,8 +349,9 @@ func (ct *CachingTransport) roundTripWithSingleFlight(req *http.Request, reqBody
 	if isSSEContentType(resp.Header.Get("Content-Type")) {
 		call.resp = resp
 		call.err = nil
+		call.sse = true
 		// For SSE, we cannot buffer the body. Mark the call done so waiters
-		// fall through and re-check the store after the stream completes.
+		// fall through and re-query the store after the stream completes.
 		call.wg.Done()
 		ct.sfMu.Lock()
 		delete(ct.sfCalls, sfKey)
@@ -658,6 +678,49 @@ func (ct *CachingTransport) sseResponseFromTape(tape Tape) *http.Response {
 		Header:     header,
 		Body:       pr,
 	}
+}
+
+// reQueryStoreForSSE is the SSE single-flight waiter path. After the leader's
+// stream completes and is persisted, waiters re-query the store for the
+// matching tape and serve it. If the tape is not found (e.g., the leader's
+// store write failed or the stream was truncated), the waiter falls through
+// to a direct upstream call as a last resort.
+func (ct *CachingTransport) reQueryStoreForSSE(req *http.Request, reqBody []byte) (*http.Response, error) {
+	if reqBody != nil {
+		req.Body = io.NopCloser(bytes.NewReader(reqBody))
+	}
+
+	tapes, err := ct.store.List(req.Context(), Filter{Route: ct.route})
+	if err != nil {
+		ct.onErrorSafe(fmt.Errorf("httptape: SSE single-flight waiter store list: %w", err))
+		// Fall through to direct upstream call.
+		if reqBody != nil {
+			req.Body = io.NopCloser(bytes.NewReader(reqBody))
+		}
+		bodyHash := BodyHashFromBytes(reqBody)
+		return ct.roundTripUpstream(req, reqBody, bodyHash)
+	}
+
+	if reqBody != nil {
+		req.Body = io.NopCloser(bytes.NewReader(reqBody))
+	}
+
+	tape, ok := ct.matcher.Match(req, tapes)
+	if ok && tape.Response.IsSSE() {
+		return ct.sseResponseFromTape(tape), nil
+	}
+	if ok {
+		return ct.tapeToResponse(tape), nil
+	}
+
+	// Tape not found -- leader's store write may have failed.
+	// Fall through to a direct upstream call.
+	ct.onErrorSafe(fmt.Errorf("httptape: SSE single-flight waiter: no matching tape found after leader completed, falling back to direct upstream call"))
+	if reqBody != nil {
+		req.Body = io.NopCloser(bytes.NewReader(reqBody))
+	}
+	bodyHash := BodyHashFromBytes(reqBody)
+	return ct.roundTripUpstream(req, reqBody, bodyHash)
 }
 
 // doSingleFlight coordinates dedup for concurrent cache misses. This is
