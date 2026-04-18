@@ -34,10 +34,10 @@ dependencies {
     implementation("ai.koog:koog-ktor:0.8.0")
 
     // kotlinx-serialization (Koog transitive, but explicit for clarity)
-    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.10.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
 
     // Logging
-    implementation("ch.qos.logback:logback-classic:1.5.13")
+    implementation("ch.qos.logback:logback-classic:1.5.32")
 
     // Test — Kotest
     testImplementation("io.kotest:kotest-runner-junit5:6.1.11")
