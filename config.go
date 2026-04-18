@@ -29,14 +29,36 @@ var validActions = map[string]struct{}{
 	ActionFake:          {},
 }
 
-// Config represents a declarative sanitization configuration.
+// Config represents a declarative configuration for httptape.
 // It can be loaded from JSON or constructed programmatically.
 //
 // The Version field must be "1". The Rules field contains an ordered list
 // of sanitization rules that map to the existing Pipeline / SanitizeFunc API.
+// The optional Matcher field declares which criteria the replay server's
+// CompositeMatcher uses to select recorded tapes.
 type Config struct {
-	Version string `json:"version"`
-	Rules   []Rule `json:"rules"`
+	Version string         `json:"version"`
+	Matcher *MatcherConfig `json:"matcher,omitempty"`
+	Rules   []Rule         `json:"rules"`
+}
+
+// MatcherConfig declares the composition of matching criteria for the replay
+// server. It maps to a CompositeMatcher constructed via Config.BuildMatcher.
+type MatcherConfig struct {
+	Criteria []CriterionConfig `json:"criteria"`
+}
+
+// CriterionConfig represents a single matching criterion in the declarative
+// config. The Type field is the discriminator (matches Criterion.Name()).
+// Type-specific fields are validated based on the Type value.
+//
+// Currently supported types:
+//   - "method":     matches on HTTP method (no type-specific fields)
+//   - "path":       matches on URL path (no type-specific fields)
+//   - "body_fuzzy": matches on specific JSON body fields (requires Paths)
+type CriterionConfig struct {
+	Type  string   `json:"type"`
+	Paths []string `json:"paths,omitempty"`
 }
 
 // Rule represents a single sanitization rule within a Config.
@@ -96,10 +118,12 @@ func LoadConfigFile(path string) (*Config, error) {
 //
 // Validation checks include:
 //   - Version must be "1"
-//   - Rules must be non-empty
+//   - Rules must be non-empty (unless a matcher is configured)
 //   - Each rule must have a known action
 //   - Action-specific required fields must be present
 //   - All paths must be valid JSONPath-like syntax
+//   - If a matcher is configured, each criterion type must be recognized
+//     and type-specific field requirements must be met
 func (c *Config) Validate() error {
 	var errs []string
 
@@ -107,7 +131,7 @@ func (c *Config) Validate() error {
 		errs = append(errs, fmt.Sprintf("unsupported version %q (expected %q)", c.Version, configVersion))
 	}
 
-	if len(c.Rules) == 0 {
+	if len(c.Rules) == 0 && c.Matcher == nil {
 		errs = append(errs, "rules must be a non-empty array")
 	}
 
@@ -177,10 +201,117 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	// Validate matcher config if present.
+	if c.Matcher != nil {
+		if len(c.Matcher.Criteria) == 0 {
+			errs = append(errs, "matcher.criteria must be a non-empty array")
+		}
+		for i, cc := range c.Matcher.Criteria {
+			prefix := fmt.Sprintf("matcher.criteria[%d]", i)
+
+			builder, ok := criterionBuilders[cc.Type]
+			if !ok {
+				errs = append(errs, fmt.Sprintf("%s: unknown type %q", prefix, cc.Type))
+				continue
+			}
+
+			// Use the builder's validate function for type-specific checks.
+			if vErr := builder.validate(cc); vErr != nil {
+				errs = append(errs, fmt.Sprintf("%s: %v", prefix, vErr))
+			}
+		}
+	}
+
 	if len(errs) > 0 {
 		return fmt.Errorf("config validation: %s", strings.Join(errs, "; "))
 	}
 	return nil
+}
+
+// criterionBuilder holds a factory function and a validation function for
+// a single criterion type. The validate function performs shape checks
+// (type-specific field requirements). The build function constructs the
+// Criterion value.
+type criterionBuilder struct {
+	validate func(CriterionConfig) error
+	build    func(CriterionConfig) (Criterion, error)
+}
+
+// criterionBuilders maps criterion type names to their builder definitions.
+// Each entry corresponds to a supported Criterion.Name() value.
+var criterionBuilders = map[string]criterionBuilder{
+	"method":     {validate: validateMethodCriterion, build: buildMethodCriterion},
+	"path":       {validate: validatePathCriterion, build: buildPathCriterion},
+	"body_fuzzy": {validate: validateBodyFuzzyCriterion, build: buildBodyFuzzyCriterion},
+}
+
+func validateMethodCriterion(cc CriterionConfig) error {
+	if len(cc.Paths) > 0 {
+		return fmt.Errorf("%q does not use \"paths\"", cc.Type)
+	}
+	return nil
+}
+
+func buildMethodCriterion(_ CriterionConfig) (Criterion, error) {
+	return MethodCriterion{}, nil
+}
+
+func validatePathCriterion(cc CriterionConfig) error {
+	if len(cc.Paths) > 0 {
+		return fmt.Errorf("%q does not use \"paths\"", cc.Type)
+	}
+	return nil
+}
+
+func buildPathCriterion(_ CriterionConfig) (Criterion, error) {
+	return PathCriterion{}, nil
+}
+
+func validateBodyFuzzyCriterion(cc CriterionConfig) error {
+	if len(cc.Paths) == 0 {
+		return fmt.Errorf("%q requires non-empty \"paths\"", cc.Type)
+	}
+	for _, p := range cc.Paths {
+		if _, ok := parsePath(p); !ok {
+			return fmt.Errorf("%q invalid path syntax: %q", cc.Type, p)
+		}
+	}
+	return nil
+}
+
+func buildBodyFuzzyCriterion(cc CriterionConfig) (Criterion, error) {
+	return NewBodyFuzzyCriterion(cc.Paths...), nil
+}
+
+// BuildMatcher constructs a Matcher from the config's matcher declaration.
+// If no matcher is configured (Matcher field is nil or has no criteria),
+// it returns DefaultMatcher().
+//
+// BuildMatcher validates criterion types and their fields. It returns an
+// error if any criterion type is unknown or required fields are missing.
+//
+// BuildMatcher assumes the config has been validated via Validate(). However,
+// it performs its own materialization-time checks (e.g., for criteria that
+// require runtime validation beyond shape checks).
+func (c *Config) BuildMatcher() (Matcher, error) {
+	if c.Matcher == nil || len(c.Matcher.Criteria) == 0 {
+		return DefaultMatcher(), nil
+	}
+
+	criteria := make([]Criterion, 0, len(c.Matcher.Criteria))
+	for i, cc := range c.Matcher.Criteria {
+		builder, ok := criterionBuilders[cc.Type]
+		if !ok {
+			return nil, fmt.Errorf("matcher: criteria[%d]: unknown type %q", i, cc.Type)
+		}
+		criterion, err := builder.build(cc)
+		if err != nil {
+			return nil, fmt.Errorf("matcher: criteria[%d]: %w", i, err)
+		}
+		criteria = append(criteria, criterion)
+	}
+
+	return NewCompositeMatcher(criteria...), nil
 }
 
 // BuildPipeline converts the Config into a Pipeline by mapping each Rule

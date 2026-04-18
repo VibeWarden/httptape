@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -468,6 +469,170 @@ func TestSSETimingFlagIntegration(t *testing.T) {
 				t.Errorf("run(%v) = %d, want %d", tt.args, got, tt.wantCode)
 			}
 		})
+	}
+}
+
+func TestServeWithConfigMatcher(t *testing.T) {
+	tmpDir := t.TempDir()
+	fixturesDir := filepath.Join(tmpDir, "fixtures")
+
+	// Create a fixtures directory with two tapes at the same POST path
+	// but different response bodies. We'll use body_fuzzy matching to
+	// distinguish them by $.action field.
+	store, err := httptape.NewFileStore(httptape.WithDirectory(fixturesDir))
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	ctx := context.Background()
+
+	tape1 := httptape.NewTape("test", httptape.RecordedReq{
+		Method:  "POST",
+		URL:     "http://example.com/api/do",
+		Headers: http.Header{"Content-Type": {"application/json"}},
+		Body:    []byte(`{"action":"create","name":"widget"}`),
+	}, httptape.RecordedResp{
+		StatusCode: 201,
+		Headers:    http.Header{"Content-Type": {"application/json"}},
+		Body:       []byte(`{"result":"created"}`),
+	})
+	if err := store.Save(ctx, tape1); err != nil {
+		t.Fatalf("save tape1: %v", err)
+	}
+
+	tape2 := httptape.NewTape("test", httptape.RecordedReq{
+		Method:  "POST",
+		URL:     "http://example.com/api/do",
+		Headers: http.Header{"Content-Type": {"application/json"}},
+		Body:    []byte(`{"action":"delete","name":"widget"}`),
+	}, httptape.RecordedResp{
+		StatusCode: 200,
+		Headers:    http.Header{"Content-Type": {"application/json"}},
+		Body:       []byte(`{"result":"deleted"}`),
+	})
+	if err := store.Save(ctx, tape2); err != nil {
+		t.Fatalf("save tape2: %v", err)
+	}
+
+	// Write a config file with body_fuzzy matching on $.action.
+	configPath := filepath.Join(tmpDir, "config.json")
+	configContent := `{
+		"version": "1",
+		"matcher": {
+			"criteria": [
+				{"type": "method"},
+				{"type": "path"},
+				{"type": "body_fuzzy", "paths": ["$.action"]}
+			]
+		},
+		"rules": []
+	}`
+	if err := os.WriteFile(configPath, []byte(configContent), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	// Find a free port.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	ln.Close()
+
+	// Start the server in a goroutine.
+	done := make(chan int, 1)
+	go func() {
+		done <- run([]string{
+			"serve",
+			"--fixtures", fixturesDir,
+			"--port", itoa(port),
+			"--config", configPath,
+		})
+	}()
+
+	base := "http://127.0.0.1:" + itoa(port)
+
+	// Wait for the server to start.
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		resp, err := http.Get(base + "/healthz")
+		if err == nil {
+			resp.Body.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("server never came up: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// Send POST with action=create, expect "created" response.
+	resp, err := http.Post(base+"/api/do", "application/json",
+		strings.NewReader(`{"action":"create","name":"something"}`))
+	if err != nil {
+		t.Fatalf("POST create: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 201 {
+		t.Errorf("create status = %d, want 201", resp.StatusCode)
+	}
+	if !strings.Contains(string(body), "created") {
+		t.Errorf("create body = %q, want to contain %q", string(body), "created")
+	}
+
+	// Send POST with action=delete, expect "deleted" response.
+	resp, err = http.Post(base+"/api/do", "application/json",
+		strings.NewReader(`{"action":"delete","name":"something"}`))
+	if err != nil {
+		t.Fatalf("POST delete: %v", err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Errorf("delete status = %d, want 200", resp.StatusCode)
+	}
+	if !strings.Contains(string(body), "deleted") {
+		t.Errorf("delete body = %q, want to contain %q", string(body), "deleted")
+	}
+
+	// Shutdown.
+	p, _ := os.FindProcess(os.Getpid())
+	_ = p.Signal(os.Interrupt)
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("CLI did not exit after SIGINT")
+	}
+}
+
+func TestServeWithInvalidConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	fixturesDir := filepath.Join(tmpDir, "fixtures")
+	if err := os.MkdirAll(fixturesDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	configPath := filepath.Join(tmpDir, "bad-config.json")
+	if err := os.WriteFile(configPath, []byte(`{"version":"1","rules":[],"matcher":{"criteria":[{"type":"bogus"}]}}`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	got := run([]string{
+		"serve",
+		"--fixtures", fixturesDir,
+		"--config", configPath,
+	})
+	if got != exitRuntime {
+		t.Errorf("got exit %d, want %d (runtime error)", got, exitRuntime)
+	}
+}
+
+func TestServeNoConfig(t *testing.T) {
+	// serve with no --config flag should work fine (default behavior).
+	got := run([]string{"serve", "-h"})
+	if got != exitOK {
+		t.Errorf("got exit %d, want %d", got, exitOK)
 	}
 }
 

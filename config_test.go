@@ -581,6 +581,344 @@ func TestParseFakerSpec_DateDefaultFormat(t *testing.T) {
 	}
 }
 
+// ---------- Matcher config tests ----------
+
+func TestLoadConfig_MatcherValid(t *testing.T) {
+	input := `{
+		"version": "1",
+		"matcher": {
+			"criteria": [
+				{"type": "method"},
+				{"type": "path"},
+				{"type": "body_fuzzy", "paths": ["$.messages[*].role"]}
+			]
+		},
+		"rules": [
+			{"action": "redact_headers"}
+		]
+	}`
+
+	cfg, err := LoadConfig(strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if cfg.Matcher == nil {
+		t.Fatal("Matcher is nil, want non-nil")
+	}
+	if len(cfg.Matcher.Criteria) != 3 {
+		t.Fatalf("len(criteria) = %d, want 3", len(cfg.Matcher.Criteria))
+	}
+	if cfg.Matcher.Criteria[0].Type != "method" {
+		t.Errorf("criteria[0].type = %q, want %q", cfg.Matcher.Criteria[0].Type, "method")
+	}
+	if cfg.Matcher.Criteria[1].Type != "path" {
+		t.Errorf("criteria[1].type = %q, want %q", cfg.Matcher.Criteria[1].Type, "path")
+	}
+	if cfg.Matcher.Criteria[2].Type != "body_fuzzy" {
+		t.Errorf("criteria[2].type = %q, want %q", cfg.Matcher.Criteria[2].Type, "body_fuzzy")
+	}
+	if len(cfg.Matcher.Criteria[2].Paths) != 1 || cfg.Matcher.Criteria[2].Paths[0] != "$.messages[*].role" {
+		t.Errorf("criteria[2].paths = %v, want [$.messages[*].role]", cfg.Matcher.Criteria[2].Paths)
+	}
+}
+
+func TestLoadConfig_MatcherValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		wantErr string
+	}{
+		{
+			name:    "unknown criterion type",
+			input:   `{"version":"1","matcher":{"criteria":[{"type":"bogus"}]},"rules":[{"action":"redact_headers"}]}`,
+			wantErr: `unknown type "bogus"`,
+		},
+		{
+			name:    "body_fuzzy missing paths",
+			input:   `{"version":"1","matcher":{"criteria":[{"type":"body_fuzzy"}]},"rules":[{"action":"redact_headers"}]}`,
+			wantErr: `"body_fuzzy" requires non-empty "paths"`,
+		},
+		{
+			name:    "method with paths",
+			input:   `{"version":"1","matcher":{"criteria":[{"type":"method","paths":["$.x"]}]},"rules":[{"action":"redact_headers"}]}`,
+			wantErr: `"method" does not use "paths"`,
+		},
+		{
+			name:    "path with paths",
+			input:   `{"version":"1","matcher":{"criteria":[{"type":"path","paths":["$.x"]}]},"rules":[{"action":"redact_headers"}]}`,
+			wantErr: `"path" does not use "paths"`,
+		},
+		{
+			name:    "body_fuzzy invalid path syntax",
+			input:   `{"version":"1","matcher":{"criteria":[{"type":"body_fuzzy","paths":["invalid"]}]},"rules":[{"action":"redact_headers"}]}`,
+			wantErr: `invalid path syntax: "invalid"`,
+		},
+		{
+			name:    "empty criteria array",
+			input:   `{"version":"1","matcher":{"criteria":[]},"rules":[{"action":"redact_headers"}]}`,
+			wantErr: "matcher.criteria must be a non-empty array",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := LoadConfig(strings.NewReader(tt.input))
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error = %q, want to contain %q", err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoadConfig_EmptyRulesWithMatcher(t *testing.T) {
+	input := `{
+		"version": "1",
+		"matcher": {
+			"criteria": [
+				{"type": "method"},
+				{"type": "path"}
+			]
+		},
+		"rules": []
+	}`
+
+	cfg, err := LoadConfig(strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Matcher == nil {
+		t.Fatal("Matcher is nil")
+	}
+	if len(cfg.Rules) != 0 {
+		t.Errorf("len(rules) = %d, want 0", len(cfg.Rules))
+	}
+}
+
+func TestLoadConfig_EmptyRulesNoMatcher(t *testing.T) {
+	input := `{"version": "1", "rules": []}`
+	_, err := LoadConfig(strings.NewReader(input))
+	if err == nil {
+		t.Fatal("expected error for empty rules without matcher, got nil")
+	}
+	if !strings.Contains(err.Error(), "rules must be a non-empty array") {
+		t.Errorf("error = %q, want to contain %q", err.Error(), "rules must be a non-empty array")
+	}
+}
+
+func TestConfig_BuildMatcher_NoMatcher(t *testing.T) {
+	cfg := &Config{
+		Version: "1",
+		Rules:   []Rule{{Action: ActionRedactHeaders}},
+	}
+
+	matcher, err := cfg.BuildMatcher()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Should return DefaultMatcher equivalent (CompositeMatcher with method + path).
+	cm, ok := matcher.(*CompositeMatcher)
+	if !ok {
+		t.Fatalf("expected *CompositeMatcher, got %T", matcher)
+	}
+	if len(cm.criteria) != 2 {
+		t.Fatalf("criteria count = %d, want 2", len(cm.criteria))
+	}
+	if cm.criteria[0].Name() != "method" {
+		t.Errorf("criteria[0].Name() = %q, want %q", cm.criteria[0].Name(), "method")
+	}
+	if cm.criteria[1].Name() != "path" {
+		t.Errorf("criteria[1].Name() = %q, want %q", cm.criteria[1].Name(), "path")
+	}
+}
+
+func TestConfig_BuildMatcher_Composed(t *testing.T) {
+	cfg := &Config{
+		Version: "1",
+		Matcher: &MatcherConfig{
+			Criteria: []CriterionConfig{
+				{Type: "method"},
+				{Type: "path"},
+				{Type: "body_fuzzy", Paths: []string{"$.messages[*].role", "$.model"}},
+			},
+		},
+		Rules: []Rule{},
+	}
+
+	matcher, err := cfg.BuildMatcher()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	cm, ok := matcher.(*CompositeMatcher)
+	if !ok {
+		t.Fatalf("expected *CompositeMatcher, got %T", matcher)
+	}
+	if len(cm.criteria) != 3 {
+		t.Fatalf("criteria count = %d, want 3", len(cm.criteria))
+	}
+
+	wantNames := []string{"method", "path", "body_fuzzy"}
+	for i, want := range wantNames {
+		if cm.criteria[i].Name() != want {
+			t.Errorf("criteria[%d].Name() = %q, want %q", i, cm.criteria[i].Name(), want)
+		}
+	}
+
+	// Verify body_fuzzy criterion has the correct paths.
+	bfc, ok := cm.criteria[2].(*BodyFuzzyCriterion)
+	if !ok {
+		t.Fatalf("expected *BodyFuzzyCriterion, got %T", cm.criteria[2])
+	}
+	if len(bfc.Paths) != 2 {
+		t.Fatalf("body_fuzzy paths count = %d, want 2", len(bfc.Paths))
+	}
+	if bfc.Paths[0] != "$.messages[*].role" {
+		t.Errorf("body_fuzzy paths[0] = %q, want %q", bfc.Paths[0], "$.messages[*].role")
+	}
+	if bfc.Paths[1] != "$.model" {
+		t.Errorf("body_fuzzy paths[1] = %q, want %q", bfc.Paths[1], "$.model")
+	}
+}
+
+func TestConfig_BuildMatcher_UnknownType(t *testing.T) {
+	cfg := &Config{
+		Version: "1",
+		Matcher: &MatcherConfig{
+			Criteria: []CriterionConfig{
+				{Type: "unknown_criterion"},
+			},
+		},
+		Rules: []Rule{},
+	}
+
+	_, err := cfg.BuildMatcher()
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), `unknown type "unknown_criterion"`) {
+		t.Errorf("error = %q, want to contain %q", err.Error(), `unknown type "unknown_criterion"`)
+	}
+}
+
+func TestConfig_BuildMatcher_EmptyCriteria(t *testing.T) {
+	cfg := &Config{
+		Version: "1",
+		Matcher: &MatcherConfig{
+			Criteria: []CriterionConfig{},
+		},
+		Rules: []Rule{{Action: ActionRedactHeaders}},
+	}
+
+	// Empty criteria returns DefaultMatcher.
+	matcher, err := cfg.BuildMatcher()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	cm, ok := matcher.(*CompositeMatcher)
+	if !ok {
+		t.Fatalf("expected *CompositeMatcher, got %T", matcher)
+	}
+	if len(cm.criteria) != 2 {
+		t.Fatalf("criteria count = %d, want 2 (default)", len(cm.criteria))
+	}
+}
+
+func TestLoadConfig_BackwardCompat_SanitizationOnly(t *testing.T) {
+	// Existing sanitization-only configs (no matcher) continue to work.
+	input := `{
+		"version": "1",
+		"rules": [
+			{"action": "redact_headers", "headers": ["Authorization"]},
+			{"action": "redact_body", "paths": ["$.password"]},
+			{"action": "fake", "seed": "seed", "paths": ["$.email"]}
+		]
+	}`
+
+	cfg, err := LoadConfig(strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if cfg.Matcher != nil {
+		t.Error("Matcher should be nil for sanitization-only config")
+	}
+
+	// BuildMatcher returns default.
+	matcher, err := cfg.BuildMatcher()
+	if err != nil {
+		t.Fatalf("BuildMatcher error: %v", err)
+	}
+	cm, ok := matcher.(*CompositeMatcher)
+	if !ok {
+		t.Fatalf("expected *CompositeMatcher, got %T", matcher)
+	}
+	if len(cm.criteria) != 2 {
+		t.Errorf("criteria count = %d, want 2 (default)", len(cm.criteria))
+	}
+
+	// BuildPipeline still works.
+	pipeline := cfg.BuildPipeline()
+	if pipeline == nil {
+		t.Fatal("BuildPipeline returned nil")
+	}
+	if len(pipeline.funcs) != 3 {
+		t.Errorf("pipeline.funcs len = %d, want 3", len(pipeline.funcs))
+	}
+}
+
+func TestLoadConfig_MatcherWithRules(t *testing.T) {
+	// Config with both matcher and sanitization rules works correctly.
+	input := `{
+		"version": "1",
+		"matcher": {
+			"criteria": [
+				{"type": "method"},
+				{"type": "path"},
+				{"type": "body_fuzzy", "paths": ["$.action"]}
+			]
+		},
+		"rules": [
+			{"action": "redact_headers"}
+		]
+	}`
+
+	cfg, err := LoadConfig(strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if cfg.Matcher == nil {
+		t.Fatal("Matcher is nil")
+	}
+	if len(cfg.Rules) != 1 {
+		t.Errorf("len(rules) = %d, want 1", len(cfg.Rules))
+	}
+
+	// Both BuildMatcher and BuildPipeline work.
+	matcher, err := cfg.BuildMatcher()
+	if err != nil {
+		t.Fatalf("BuildMatcher error: %v", err)
+	}
+	cm, ok := matcher.(*CompositeMatcher)
+	if !ok {
+		t.Fatalf("expected *CompositeMatcher, got %T", matcher)
+	}
+	if len(cm.criteria) != 3 {
+		t.Errorf("criteria count = %d, want 3", len(cm.criteria))
+	}
+
+	pipeline := cfg.BuildPipeline()
+	if len(pipeline.funcs) != 1 {
+		t.Errorf("pipeline.funcs len = %d, want 1", len(pipeline.funcs))
+	}
+}
+
 // writeTestFile is a helper that writes content to the given path.
 func writeTestFile(path, content string) error {
 	return os.WriteFile(path, []byte(content), 0o644)
