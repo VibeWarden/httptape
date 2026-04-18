@@ -385,8 +385,13 @@ func headerContains(h http.Header, canonicalKey, value string) bool {
 //   - $.array[*].field    -- field within each element of an array
 //
 // Matching semantics:
-//   - Both bodies are unmarshaled as JSON. If either body is not valid JSON,
-//     the criterion returns 0 (no match).
+//   - If both the incoming request body and the tape body are absent
+//     (nil, empty, or not valid JSON), the criterion returns 1 (vacuous
+//     match — the body dimension is irrelevant for this request/tape
+//     pair). If exactly one side is absent, the criterion returns 0.
+//   - When both bodies are present (not absent per the rule above),
+//     they are unmarshaled as JSON. Path extraction and comparison
+//     proceeds on the unmarshaled values.
 //   - For each specified path, the value is extracted from both the request
 //     and the tape body. If a path does not exist in both bodies, it is
 //     skipped (does not cause a mismatch).
@@ -404,7 +409,8 @@ func headerContains(h http.Header, canonicalKey, value string) bool {
 //
 // Invalid or unsupported paths are silently ignored (same as RedactBodyPaths).
 //
-// Returns score 6 on match, 0 on mismatch.
+// Returns score 6 on match, 1 on vacuous match (both bodies absent),
+// 0 on mismatch.
 //
 // Note: using both MatchBodyFuzzy and MatchBodyHash in the same
 // CompositeMatcher is safe but semantically redundant. If MatchBodyHash
@@ -443,12 +449,17 @@ func MatchBodyFuzzy(paths ...string) MatchCriterion {
 			reqBody = bodyBytes
 		}
 
-		// Unmarshal both bodies.
+		// Determine whether each side is "absent" (nil, empty, or not valid JSON).
 		var reqData, tapeData any
-		if err := json.Unmarshal(reqBody, &reqData); err != nil {
-			return 0
+		reqAbsent := len(reqBody) == 0 || json.Unmarshal(reqBody, &reqData) != nil
+		tapeAbsent := len(candidate.Request.Body) == 0 || json.Unmarshal(candidate.Request.Body, &tapeData) != nil
+
+		// Vacuous-true: both bodies absent — return minimum positive score.
+		if reqAbsent && tapeAbsent {
+			return 1
 		}
-		if err := json.Unmarshal(candidate.Request.Body, &tapeData); err != nil {
+		// Asymmetric: one absent, one present — mismatch.
+		if reqAbsent || tapeAbsent {
 			return 0
 		}
 

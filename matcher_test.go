@@ -1175,8 +1175,156 @@ func TestMatchBodyFuzzy_BothBodiesEmpty(t *testing.T) {
 	tape := Tape{Request: RecordedReq{Body: nil}}
 
 	got := criterion(req, tape)
-	if got != 0 {
-		t.Errorf("MatchBodyFuzzy() both empty = %d, want 0", got)
+	if got != 1 {
+		t.Errorf("MatchBodyFuzzy() both empty = %d, want 1", got)
+	}
+}
+
+func TestMatchBodyFuzzy_VacuousTrue(t *testing.T) {
+	criterion := MatchBodyFuzzy("$.action")
+
+	tests := []struct {
+		name     string
+		reqBody  []byte // nil means no body on the request
+		tapeBody []byte // nil means no body on the tape
+		want     int
+	}{
+		{
+			name:     "both nil",
+			reqBody:  nil,
+			tapeBody: nil,
+			want:     1,
+		},
+		{
+			name:     "both empty bytes",
+			reqBody:  []byte{},
+			tapeBody: []byte{},
+			want:     1,
+		},
+		{
+			name:     "req nil tape empty",
+			reqBody:  nil,
+			tapeBody: []byte{},
+			want:     1,
+		},
+		{
+			name:     "req empty tape nil",
+			reqBody:  []byte{},
+			tapeBody: nil,
+			want:     1,
+		},
+		{
+			name:     "both invalid JSON",
+			reqBody:  []byte("not json"),
+			tapeBody: []byte("also not json"),
+			want:     1,
+		},
+		{
+			name:     "req nil tape has body",
+			reqBody:  nil,
+			tapeBody: []byte(`{"action":"create"}`),
+			want:     0,
+		},
+		{
+			name:     "req has body tape nil",
+			reqBody:  []byte(`{"action":"create"}`),
+			tapeBody: nil,
+			want:     0,
+		},
+		{
+			name:     "req invalid tape has body",
+			reqBody:  []byte("not json"),
+			tapeBody: []byte(`{"action":"create"}`),
+			want:     0,
+		},
+		{
+			name:     "req has body tape invalid",
+			reqBody:  []byte(`{"action":"create"}`),
+			tapeBody: []byte("not json"),
+			want:     0,
+		},
+		{
+			name:     "both empty JSON objects",
+			reqBody:  []byte(`{}`),
+			tapeBody: []byte(`{}`),
+			want:     0,
+		},
+		{
+			name:     "both JSON null",
+			reqBody:  []byte(`null`),
+			tapeBody: []byte(`null`),
+			want:     0,
+		},
+		{
+			name:     "both bodied fields match",
+			reqBody:  []byte(`{"action":"create"}`),
+			tapeBody: []byte(`{"action":"create"}`),
+			want:     6,
+		},
+		{
+			name:     "both bodied fields differ",
+			reqBody:  []byte(`{"action":"create"}`),
+			tapeBody: []byte(`{"action":"delete"}`),
+			want:     0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var body io.Reader
+			if tt.reqBody != nil {
+				body = bytes.NewReader(tt.reqBody)
+			}
+			req := httptest.NewRequest("POST", "/test", body)
+			tape := Tape{Request: RecordedReq{Body: tt.tapeBody}}
+
+			got := criterion(req, tape)
+			if got != tt.want {
+				t.Errorf("MatchBodyFuzzy() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMatchBodyFuzzy_VacuousTrueComposability(t *testing.T) {
+	// Integration test: validates the real user story from issue #178.
+	// A CompositeMatcher with MatchMethod, MatchPath, and MatchBodyFuzzy
+	// must correctly match a body-less GET request against a body-less
+	// GET tape, without MatchBodyFuzzy eliminating the candidate via score 0.
+	matcher := NewCompositeMatcher(
+		MatchMethod(),
+		MatchPath(),
+		MatchBodyFuzzy("$.action"),
+	)
+
+	// Candidate tapes: one body-less GET and one bodied POST.
+	getTape := Tape{
+		ID: "get-tape",
+		Request: RecordedReq{
+			Method: "GET",
+			URL:    "http://example.com/test",
+			Body:   nil, // no body
+		},
+	}
+	postTape := Tape{
+		ID: "post-tape",
+		Request: RecordedReq{
+			Method: "POST",
+			URL:    "http://example.com/test",
+			Body:   []byte(`{"action":"create"}`),
+		},
+	}
+	candidates := []Tape{getTape, postTape}
+
+	// Incoming request: GET /test with no body.
+	req := httptest.NewRequest("GET", "/test", nil)
+
+	matched, ok := matcher.Match(req, candidates)
+	if !ok {
+		t.Fatal("CompositeMatcher.Match() returned ok=false, want a match")
+	}
+	if matched.ID != "get-tape" {
+		t.Errorf("CompositeMatcher.Match() matched tape ID = %q, want %q", matched.ID, "get-tape")
 	}
 }
 
