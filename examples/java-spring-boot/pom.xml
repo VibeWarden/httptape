@@ -19,12 +19,9 @@
         <maven.compiler.release>25</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
-        <spring-boot.version>3.5.3</spring-boot.version>
-        <!-- TODO: Spring Boot 4.0.x does not yet exist on Maven Central (as of 2026-04-16).
-             The reviewer's request to bump to 4.0.5 cannot be fulfilled yet.
-             Holding at Spring Boot 3.5.3 (latest 3.x GA). Revisit when Spring Boot 4 ships. -->
-        <spring-ai.version>1.0.0</spring-ai.version>
-        <testcontainers.version>1.20.6</testcontainers.version>
+        <spring-boot.version>4.0.5</spring-boot.version>
+        <spring-ai.version>2.0.0-M4</spring-ai.version>
+        <!-- Testcontainers version managed by Spring Boot 4.0.5 BOM (2.0.4) -->
     </properties>
 
     <dependencyManagement>
@@ -43,13 +40,7 @@
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>
-            <dependency>
-                <groupId>org.testcontainers</groupId>
-                <artifactId>testcontainers-bom</artifactId>
-                <version>${testcontainers.version}</version>
-                <type>pom</type>
-                <scope>import</scope>
-            </dependency>
+            <!-- Testcontainers BOM not needed: Spring Boot 4.0.5 manages Testcontainers 2.x -->
         </dependencies>
     </dependencyManagement>
 
@@ -60,7 +51,7 @@
             <artifactId>spring-boot-starter-web</artifactId>
         </dependency>
 
-        <!-- Spring AI: OpenAI integration (1.0.0 renamed to spring-ai-starter-model-openai) -->
+        <!-- Spring AI: OpenAI integration -->
         <dependency>
             <groupId>org.springframework.ai</groupId>
             <artifactId>spring-ai-starter-model-openai</artifactId>
@@ -79,7 +70,7 @@
         </dependency>
         <dependency>
             <groupId>org.testcontainers</groupId>
-            <artifactId>junit-jupiter</artifactId>
+            <artifactId>testcontainers-junit-jupiter</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>

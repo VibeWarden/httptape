@@ -43,6 +43,8 @@ The story: **one tool, one test approach, both integration shapes.**
 - **Docker** (for Testcontainers and `docker compose`)
 - **JDK 25** (for `./mvnw test`)
 
+**Spring AI version**: this demo uses Spring AI 2.0.0-M4 (milestone) because Spring AI 1.x targets Spring Boot 3.x. We're tracking the upcoming Spring AI 2.0.0 GA -- bump to GA when available.
+
 ## Quick start
 
 ```bash
@@ -115,7 +117,7 @@ java-spring-boot/
         get-user-999.json                # 404 fixture
   mocks/
     sanitize.json                        # typed-Faker config (illustrative)
-  pom.xml                               # Spring Boot 3.5.3, Spring AI 1.0.0 (BOM-based)
+  pom.xml                               # Spring Boot 4.0.5, Spring AI 2.0.0-M4 (BOM-based)
   Dockerfile                            # multi-stage Maven -> JRE 25
   docker-compose.yml                    # httptape + app
   mvnw, mvnw.cmd, .mvn/                 # Maven Wrapper (no host Maven needed)
