@@ -2,6 +2,7 @@ package httptape
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,7 +11,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // TestMemoryStore_ConcurrentSaveLoad exercises concurrent Save and Load
@@ -362,3 +365,182 @@ func TestServer_ConcurrentSSEReplay(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// TestCachingTransport_SingleFlightDedupesConcurrentMisses verifies that
+// concurrent cache misses for the same request key result in exactly one
+// upstream call. All goroutines are released via a barrier to ensure they
+// arrive before the store is populated, exercising the single-flight
+// WaitGroup path under the race detector.
+func TestCachingTransport_SingleFlightDedupesConcurrentMisses(t *testing.T) {
+	const N = 50
+
+	var upstreamHits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits.Add(1)
+		time.Sleep(100 * time.Millisecond) // hold the leader long enough for followers to arrive
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"deduped":true}`)
+	}))
+	defer srv.Close()
+
+	store := NewMemoryStore()
+	ct := NewCachingTransport(http.DefaultTransport, store,
+		WithCacheSingleFlight(true),
+	)
+
+	barrier := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(N)
+	errs := make([]error, N)
+	statuses := make([]int, N)
+	bodies := make([]string, N)
+
+	for i := 0; i < N; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			<-barrier // wait for all goroutines to be ready
+			req, _ := http.NewRequest("GET", srv.URL+"/api/data", nil)
+			resp, err := ct.RoundTrip(req)
+			errs[idx] = err
+			if resp != nil {
+				statuses[idx] = resp.StatusCode
+				b, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				bodies[idx] = string(b)
+			}
+		}(i)
+	}
+
+	// Release all goroutines simultaneously.
+	close(barrier)
+	wg.Wait()
+
+	// Single upstream call.
+	if hits := upstreamHits.Load(); hits != 1 {
+		t.Errorf("upstream hit count = %d, want 1 (single-flight should deduplicate)", hits)
+	}
+
+	// Every goroutine received a valid response.
+	for i := 0; i < N; i++ {
+		if errs[i] != nil {
+			t.Errorf("goroutine %d error: %v", i, errs[i])
+			continue
+		}
+		if statuses[i] != http.StatusOK {
+			t.Errorf("goroutine %d status = %d, want %d", i, statuses[i], http.StatusOK)
+		}
+		if bodies[i] != `{"deduped":true}` {
+			t.Errorf("goroutine %d body = %q, want %q", i, bodies[i], `{"deduped":true}`)
+		}
+	}
+
+	// Exactly one tape was persisted.
+	tapes, err := store.List(context.Background(), Filter{})
+	if err != nil {
+		t.Fatalf("store.List error: %v", err)
+	}
+	if len(tapes) != 1 {
+		t.Errorf("store contains %d tapes, want 1", len(tapes))
+	}
+}
+
+// TestCachingTransport_SingleFlightPropagatesLeaderError verifies that when
+// the leader's upstream call fails, all waiting followers receive the same
+// error without hanging. A context timeout bounds the test so a deadlock
+// would surface as a clear failure rather than a CI-wide timeout.
+func TestCachingTransport_SingleFlightPropagatesLeaderError(t *testing.T) {
+	const N = 50
+
+	var upstreamHits atomic.Int64
+	upstream := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		upstreamHits.Add(1)
+		time.Sleep(100 * time.Millisecond) // hold the leader
+		return nil, errors.New("upstream exploded")
+	})
+
+	store := NewMemoryStore()
+	ct := NewCachingTransport(upstream, store,
+		WithCacheSingleFlight(true),
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	barrier := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(N)
+	errs := make([]error, N)
+
+	for i := 0; i < N; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			<-barrier
+			req, _ := http.NewRequestWithContext(ctx, "GET", "http://example.com/api/fail", nil)
+			resp, err := ct.RoundTrip(req)
+			if resp != nil {
+				io.Copy(io.Discard, resp.Body)
+				resp.Body.Close()
+			}
+			errs[idx] = err
+		}(i)
+	}
+
+	close(barrier)
+
+	// Use a channel to detect if wg.Wait never returns (deadlock guard).
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// All goroutines returned -- no deadlock.
+	case <-ctx.Done():
+		t.Fatal("test timed out: followers appear to be hanging (deadlock in single-flight error path)")
+	}
+
+	// Upstream was called exactly once (the leader).
+	if hits := upstreamHits.Load(); hits != 1 {
+		t.Errorf("upstream hit count = %d, want 1", hits)
+	}
+
+	// Every goroutine received an error containing the upstream failure message.
+	for i := 0; i < N; i++ {
+		if errs[i] == nil {
+			t.Errorf("goroutine %d: expected error, got nil", i)
+			continue
+		}
+		if !strings.Contains(errs[i].Error(), "upstream exploded") {
+			t.Errorf("goroutine %d: error = %q, want substring %q", i, errs[i].Error(), "upstream exploded")
+		}
+	}
+
+	// No tapes stored (error responses are not cached).
+	tapes, err := store.List(context.Background(), Filter{})
+	if err != nil {
+		t.Fatalf("store.List error: %v", err)
+	}
+	if len(tapes) != 0 {
+		t.Errorf("store contains %d tapes, want 0 (error should not be cached)", len(tapes))
+	}
+}
+
+// Note on SSE single-flight dedup (issue #220, Test 3):
+//
+// SSE responses intentionally bypass single-flight response-body cloning.
+// In roundTripWithSingleFlight (caching_transport.go, lines 349-359), when
+// the leader's upstream response has Content-Type text/event-stream, the
+// sfCall is marked sse=true and wg.Done() is called immediately. Followers
+// then re-query the store via reQueryStoreForSSE (line 322) rather than
+// cloning the leader's streaming body. This is correct: an SSE body is a
+// live io.ReadCloser that cannot be safely cloned across goroutines.
+//
+// Concurrent SSE single-flight behavior is already covered by
+// TestCachingTransport_SingleFlightSSEWaiters in caching_transport_test.go.
+// A dedicated race-detector stress test is not added here because the SSE
+// waiter path does not share mutable response state -- it performs an
+// independent store read -- so the race surface is identical to
+// TestServer_ConcurrentSSEReplay above.
