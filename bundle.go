@@ -217,6 +217,12 @@ func writeBundle(ctx context.Context, w io.Writer, tapes []Tape, cfg exportConfi
 // The entire bundle is validated before any fixtures are persisted. If the
 // manifest is missing, malformed, or any fixture fails JSON unmarshalling,
 // ImportBundle returns an error and the store is not modified.
+//
+// ImportBundle does not re-sanitize imported tapes. Bundles produced by
+// ExportBundle contain already-sanitized data, so re-sanitization would
+// corrupt deterministically faked values. If you import a bundle from an
+// untrusted or hand-edited source, validate its contents externally before
+// import -- ImportBundle stores tapes exactly as they appear in the bundle.
 func ImportBundle(ctx context.Context, s Store, r io.Reader) error {
 	gr, err := gzip.NewReader(r)
 	if err != nil {

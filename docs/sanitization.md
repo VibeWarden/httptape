@@ -140,7 +140,7 @@ httptape.FakeFields("my-project-seed",
 
 The first argument is a project-level seed used as the HMAC key. Different seeds produce different fakes. The same seed and input always produce the same output.
 
-Choose a seed that is unique to your project. It does not need to be secret -- it is used for determinism, not security.
+The seed must be non-empty and unique to your project. Treat it as a moderately sensitive value: anyone who knows the seed can predict the fake output for any input. Do not use an empty string, a default placeholder, or a seed shared across unrelated projects. Store it alongside other project configuration (e.g. environment variables), not in public source code.
 
 ### Faking strategies
 

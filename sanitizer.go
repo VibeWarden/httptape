@@ -339,9 +339,16 @@ func redactValue(v any) any {
 // request and response bodies with deterministic fakes derived from
 // HMAC-SHA256.
 //
-// The seed is a project-level secret used as the HMAC key. The same seed
-// and input value always produce the same fake output, preserving
-// cross-fixture consistency. Different seeds produce different fakes.
+// The seed is a project-level HMAC key. The same seed and input value
+// always produce the same fake output, preserving cross-fixture
+// consistency. Different seeds produce different fakes.
+//
+// The seed must be non-empty and unique to your project. Treat it as a
+// moderately sensitive value: anyone who knows the seed can predict the
+// fake output for any input. Do not use an empty string, a default
+// placeholder, or a seed shared across unrelated projects. Store it
+// alongside other project configuration (e.g. environment variables),
+// not in public source code.
 //
 // Paths use the same JSONPath-like syntax as RedactBodyPaths:
 //   - $.field             -- top-level field

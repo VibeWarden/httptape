@@ -383,8 +383,9 @@ func (f AddressFaker) Fake(seed string, original any) any {
 // request and response bodies with deterministic fakes using explicitly
 // assigned Faker implementations per path.
 //
-// The seed is a project-level secret used as the HMAC key. The fields map
-// associates JSONPath-like paths with specific Faker implementations.
+// The seed is a project-level HMAC key. The fields map associates
+// JSONPath-like paths with specific Faker implementations. See FakeFields
+// for seed sensitivity guidance.
 //
 // This gives callers explicit control over the faking strategy for each
 // field, unlike FakeFields which auto-detects the strategy from the value.
