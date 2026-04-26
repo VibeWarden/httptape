@@ -879,6 +879,88 @@ func TestMigrateFixtures_AlreadyMigratedTape(t *testing.T) {
 	}
 }
 
+func TestServeWithSynthesize(t *testing.T) {
+	// --synthesize flag should be accepted without error.
+	got := run([]string{"serve", "--fixtures", t.TempDir(), "--synthesize", "-h"})
+	if got != exitOK {
+		t.Errorf("got exit %d, want %d for serve --synthesize -h", got, exitOK)
+	}
+}
+
+func TestServeWithSynthesizeLogging(t *testing.T) {
+	// Create a fixture directory with an exemplar tape.
+	dir := t.TempDir()
+	store, err := httptape.NewFileStore(httptape.WithDirectory(dir))
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+
+	exemplar := httptape.Tape{
+		ID:       "exemplar-log-test",
+		Exemplar: true,
+		Request: httptape.RecordedReq{
+			Method:     "GET",
+			URLPattern: "/users/:id",
+		},
+		Response: httptape.RecordedResp{
+			StatusCode: 200,
+			Headers:    http.Header{"Content-Type": {"application/json"}},
+			Body:       []byte(`{"id":"{{pathParam.id}}"}`),
+		},
+	}
+	ctx := context.Background()
+	if err := store.Save(ctx, exemplar); err != nil {
+		t.Fatalf("save exemplar: %v", err)
+	}
+
+	// Just verify --synthesize flag is accepted (the -h flag triggers help and exits).
+	got := run([]string{"serve", "--fixtures", dir, "--synthesize", "-h"})
+	if got != exitOK {
+		t.Errorf("got exit %d, want %d", got, exitOK)
+	}
+}
+
+func TestServeWithInvalidExemplarTape(t *testing.T) {
+	// Create a fixture with an invalid exemplar tape (Exemplar=true but no URLPattern).
+	dir := t.TempDir()
+	store, err := httptape.NewFileStore(httptape.WithDirectory(dir))
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+
+	// Write a malformed exemplar tape directly as JSON.
+	tapeJSON := `{
+		"id": "bad-exemplar",
+		"route": "",
+		"recorded_at": "2026-01-01T00:00:00Z",
+		"exemplar": true,
+		"request": {
+			"method": "GET",
+			"url": "",
+			"headers": {},
+			"body": null,
+			"body_hash": ""
+		},
+		"response": {
+			"status_code": 200,
+			"headers": {},
+			"body": null
+		}
+	}`
+	_ = store
+	tapePath := filepath.Join(dir, "bad-exemplar.json")
+	if err := os.WriteFile(tapePath, []byte(tapeJSON), 0644); err != nil {
+		t.Fatalf("write tape: %v", err)
+	}
+
+	// The serve command should fail at startup validation because the tape
+	// has Exemplar=true but no URLPattern.
+	got := run([]string{"serve", "--fixtures", dir})
+	if got != exitRuntime {
+		t.Errorf("got exit %d, want %d (startup validation should reject bad exemplar)", got, exitRuntime)
+	}
+}
+
 func itoa(i int) string {
 	const digits = "0123456789"
 	if i == 0 {

@@ -402,10 +402,76 @@ If your fixtures were recorded with sanitization enabled, the values in headers 
 
 See [Declarative Configuration](config.md) for the config file format and [Sanitization](sanitization.md) for the programmatic API.
 
+## Exemplar tapes (synthesis mode)
+
+Exemplar tapes are hand-authored fixtures that serve as templates for URL
+families. Instead of recording one tape per URL, you author a single exemplar
+with a URL pattern and template expressions in the response body.
+
+### Required fields
+
+- `"exemplar": true` at the tape level.
+- `"url_pattern"` on the request, using colon-prefixed named segments
+  (e.g., `/users/:id`). Mutually exclusive with `"url"`.
+
+### Template expressions in exemplar bodies
+
+JSON response bodies support template expressions at string leaf positions:
+
+```json
+{
+  "id": "{{pathParam.id | int}}",
+  "name": "{{faker.name seed=user-{{pathParam.id}}}}",
+  "active": "{{request.query.active | bool}}"
+}
+```
+
+The `| int`, `| float`, and `| bool` coercion pipes convert the resolved
+string to a native JSON type (number or boolean).
+
+### Validation
+
+Exemplar tapes are validated at load time. Common validation errors:
+
+- `exemplar: true` without `url_pattern` -- error.
+- `url_pattern` without `exemplar: true` -- error.
+- Both `url` and `url_pattern` set -- error.
+- SSE exemplar (has `sse_events`) -- error (not supported).
+
+### Example
+
+```json
+{
+  "id": "products-exemplar",
+  "route": "",
+  "recorded_at": "2026-01-01T00:00:00Z",
+  "exemplar": true,
+  "request": {
+    "method": "GET",
+    "url_pattern": "/products/:category/:id",
+    "headers": {},
+    "body": null,
+    "body_hash": ""
+  },
+  "response": {
+    "status_code": 200,
+    "headers": { "Content-Type": ["application/json"] },
+    "body": {
+      "id": "{{pathParam.id | int}}",
+      "category": "{{pathParam.category}}",
+      "name": "{{faker.name seed=product-{{pathParam.id}}}}"
+    }
+  }
+}
+```
+
+See [Synthesis Mode](synthesis.md) for the full guide.
+
 ## See also
 
 - [Storage](storage.md) -- FileStore and MemoryStore details
 - [Replay](replay.md) -- how the Server matches and serves fixtures
 - [Matching](matching.md) -- customizing request-to-tape matching
+- [Synthesis](synthesis.md) -- exemplar tapes and URL pattern matching
 - [UI-First Dev](ui-first-dev.md) -- using hand-authored fixtures for frontend development
 - [Config](config.md) -- sanitization configuration reference

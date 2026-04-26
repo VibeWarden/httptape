@@ -1118,3 +1118,165 @@ func TestIntegration_PathParamFaker(t *testing.T) {
 		t.Errorf("expected first+last name, got %q", name)
 	}
 }
+
+// --- ADR-43: Exemplar synthesis integration tests ---
+
+func TestIntegration_ExemplarSynthesis(t *testing.T) {
+	store := NewMemoryStore()
+
+	// Exact tape for /users/1.
+	exactTape := NewTape("", RecordedReq{
+		Method: "GET",
+		URL:    "/users/1",
+	}, RecordedResp{
+		StatusCode: 200,
+		Headers:    http.Header{"Content-Type": {"application/json"}},
+		Body:       []byte(`{"id":1,"name":"Exact Alice"}`),
+	})
+	if err := store.Save(context.Background(), exactTape); err != nil {
+		t.Fatal(err)
+	}
+
+	// Exemplar tape for /users/:id.
+	exemplar := Tape{
+		ID:       newUUID(),
+		Exemplar: true,
+		Request: RecordedReq{
+			Method:     "GET",
+			URLPattern: "/users/:id",
+		},
+		Response: RecordedResp{
+			StatusCode: 200,
+			Headers:    http.Header{"Content-Type": {"application/json"}},
+			Body:       []byte(`{"id":"{{pathParam.id | int}}","synthetic":true}`),
+		},
+	}
+	if err := store.Save(context.Background(), exemplar); err != nil {
+		t.Fatal(err)
+	}
+
+	srv, err := NewServer(store, WithSynthesis())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	// Request /users/1 -> exact replay (no synthesis).
+	resp, err := http.Get(ts.URL + "/users/1")
+	if err != nil {
+		t.Fatalf("GET /users/1: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Fatalf("GET /users/1: status=%d, want 200", resp.StatusCode)
+	}
+	if !strings.Contains(string(body), `"Exact Alice"`) {
+		t.Errorf("GET /users/1 should return exact tape, got: %s", body)
+	}
+
+	// Request /users/2 -> synthesized response.
+	resp, err = http.Get(ts.URL + "/users/2")
+	if err != nil {
+		t.Fatalf("GET /users/2: %v", err)
+	}
+	body2, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Fatalf("GET /users/2: status=%d, want 200", resp.StatusCode)
+	}
+	if !strings.Contains(string(body2), `"id":2`) {
+		t.Errorf("GET /users/2 should have id=2, got: %s", body2)
+	}
+	if !strings.Contains(string(body2), `"synthetic":true`) {
+		t.Errorf("GET /users/2 should have synthetic=true, got: %s", body2)
+	}
+
+	// Request /users/7 -> synthesized response with different id.
+	resp, err = http.Get(ts.URL + "/users/7")
+	if err != nil {
+		t.Fatalf("GET /users/7: %v", err)
+	}
+	body7, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Fatalf("GET /users/7: status=%d, want 200", resp.StatusCode)
+	}
+	if !strings.Contains(string(body7), `"id":7`) {
+		t.Errorf("GET /users/7 should have id=7, got: %s", body7)
+	}
+
+	// Verify /users/2 and /users/7 produce different bodies.
+	if string(body2) == string(body7) {
+		t.Error("different path params should produce different bodies")
+	}
+
+	// Verify determinism: re-request /users/2.
+	resp, err = http.Get(ts.URL + "/users/2")
+	if err != nil {
+		t.Fatalf("re-GET /users/2: %v", err)
+	}
+	body2Again, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if string(body2) != string(body2Again) {
+		t.Errorf("determinism failure: first=%q, second=%q", body2, body2Again)
+	}
+}
+
+func TestIntegration_SynthesisDisabled_ExemplarIgnored(t *testing.T) {
+	store := NewMemoryStore()
+
+	// Exact tape for /users/1.
+	exactTape := NewTape("", RecordedReq{
+		Method: "GET",
+		URL:    "/users/1",
+	}, RecordedResp{
+		StatusCode: 200,
+		Headers:    http.Header{"Content-Type": {"application/json"}},
+		Body:       []byte(`{"id":1}`),
+	})
+	if err := store.Save(context.Background(), exactTape); err != nil {
+		t.Fatal(err)
+	}
+
+	// Exemplar tape for /users/:id.
+	exemplar := Tape{
+		ID:       newUUID(),
+		Exemplar: true,
+		Request: RecordedReq{
+			Method:     "GET",
+			URLPattern: "/users/:id",
+		},
+		Response: RecordedResp{
+			StatusCode: 200,
+			Headers:    http.Header{"Content-Type": {"application/json"}},
+			Body:       []byte(`{"id":"{{pathParam.id | int}}"}`),
+		},
+	}
+	if err := store.Save(context.Background(), exemplar); err != nil {
+		t.Fatal(err)
+	}
+
+	// No WithSynthesis -- exemplar should be ignored.
+	srv, err := NewServer(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/users/2")
+	if err != nil {
+		t.Fatalf("GET /users/2: %v", err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != 404 {
+		t.Errorf("GET /users/2: status=%d, want 404 (synthesis disabled)", resp.StatusCode)
+	}
+}

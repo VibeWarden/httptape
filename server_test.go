@@ -1712,3 +1712,249 @@ func TestServer_CounterAcrossRequests(t *testing.T) {
 		}
 	}
 }
+
+// --- ADR-43: Synthesis mode tests ---
+
+// storeExemplarTape creates and saves an exemplar tape to the store.
+func storeExemplarTape(t *testing.T, store *MemoryStore, method, urlPattern string, status int, body string, headers http.Header) Tape {
+	t.Helper()
+	tape := Tape{
+		ID:       newUUID(),
+		Exemplar: true,
+		Request: RecordedReq{
+			Method:     method,
+			URLPattern: urlPattern,
+		},
+		Response: RecordedResp{
+			StatusCode: status,
+			Headers:    headers,
+			Body:       []byte(body),
+		},
+	}
+	if err := store.Save(context.Background(), tape); err != nil {
+		t.Fatalf("storeExemplarTape: failed to save tape: %v", err)
+	}
+	return tape
+}
+
+func TestServer_SynthesisDisabled_ExemplarIgnored(t *testing.T) {
+	store := NewMemoryStore()
+	storeExemplarTape(t, store, "GET", "/users/:id", 200,
+		`{"id":"{{pathParam.id | int}}"}`,
+		http.Header{"Content-Type": {"application/json"}})
+
+	srv, err := NewServer(store) // No WithSynthesis
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/users/42", nil)
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != 404 {
+		t.Errorf("status = %d, want 404 (exemplar should be ignored without synthesis)", rec.Code)
+	}
+}
+
+func TestServer_SynthesisEnabled_ExactWins(t *testing.T) {
+	store := NewMemoryStore()
+	// Exact tape for /users/1
+	storeTape(t, store, "GET", "/users/1", 200, `{"id":1,"exact":true}`,
+		http.Header{"Content-Type": {"application/json"}})
+	// Exemplar for /users/:id
+	storeExemplarTape(t, store, "GET", "/users/:id", 200,
+		`{"id":"{{pathParam.id | int}}","exact":false}`,
+		http.Header{"Content-Type": {"application/json"}})
+
+	srv, err := NewServer(store, WithSynthesis())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/users/1", nil)
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"exact":true`) {
+		t.Errorf("exact tape should win over exemplar, got: %s", body)
+	}
+}
+
+func TestServer_SynthesisEnabled_ExemplarFallback(t *testing.T) {
+	store := NewMemoryStore()
+	// Exact tape for /users/1 only
+	storeTape(t, store, "GET", "/users/1", 200, `{"id":1}`,
+		http.Header{"Content-Type": {"application/json"}})
+	// Exemplar for /users/:id
+	storeExemplarTape(t, store, "GET", "/users/:id", 200,
+		`{"id":"{{pathParam.id | int}}"}`,
+		http.Header{"Content-Type": {"application/json"}})
+
+	srv, err := NewServer(store, WithSynthesis())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Request /users/2 -- no exact match, should fall back to exemplar.
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/users/2", nil)
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	want := `{"id":2}`
+	if got := rec.Body.String(); got != want {
+		t.Errorf("body = %s, want %s", got, want)
+	}
+}
+
+func TestServer_SynthesisEnabled_MostSpecificExemplar(t *testing.T) {
+	store := NewMemoryStore()
+	// Less specific: /users/:id
+	storeExemplarTape(t, store, "GET", "/users/:id", 200,
+		`{"type":"user"}`,
+		http.Header{"Content-Type": {"application/json"}})
+	// More specific: /users/:id/orders
+	storeExemplarTape(t, store, "GET", "/users/:id/orders", 200,
+		`{"type":"orders"}`,
+		http.Header{"Content-Type": {"application/json"}})
+
+	srv, err := NewServer(store, WithSynthesis())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/users/42/orders", nil)
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	want := `{"type":"orders"}`
+	if got := rec.Body.String(); got != want {
+		t.Errorf("body = %s, want %s (more specific exemplar should win)", got, want)
+	}
+}
+
+func TestServer_SynthesisEnabled_MethodFilter(t *testing.T) {
+	store := NewMemoryStore()
+	// Exemplar for GET /users/:id only
+	storeExemplarTape(t, store, "GET", "/users/:id", 200,
+		`{"id":"{{pathParam.id | int}}"}`,
+		http.Header{"Content-Type": {"application/json"}})
+
+	srv, err := NewServer(store, WithSynthesis())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// POST /users/42 should not match GET exemplar.
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/users/42", nil)
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != 404 {
+		t.Errorf("status = %d, want 404 (method mismatch should eliminate exemplar)", rec.Code)
+	}
+}
+
+func TestServer_SynthesisEnabled_NoExemplars(t *testing.T) {
+	store := NewMemoryStore()
+	storeTape(t, store, "GET", "/users/1", 200, `{"id":1}`,
+		http.Header{"Content-Type": {"application/json"}})
+
+	srv, err := NewServer(store, WithSynthesis())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Request for unmatched URL, no exemplars in store.
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/users/999", nil)
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != 404 {
+		t.Errorf("status = %d, want 404 (no exemplars available)", rec.Code)
+	}
+}
+
+func TestServer_SynthesisEnabled_DeterministicResponse(t *testing.T) {
+	store := NewMemoryStore()
+	storeExemplarTape(t, store, "GET", "/users/:id", 200,
+		`{"id":"{{pathParam.id | int}}"}`,
+		http.Header{"Content-Type": {"application/json"}})
+
+	srv, err := NewServer(store, WithSynthesis())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Request /users/42 twice, expect identical responses.
+	var bodies [2]string
+	for i := 0; i < 2; i++ {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "/users/42", nil)
+		srv.ServeHTTP(rec, req)
+		bodies[i] = rec.Body.String()
+	}
+
+	if bodies[0] != bodies[1] {
+		t.Errorf("deterministic mismatch: first=%q, second=%q", bodies[0], bodies[1])
+	}
+}
+
+func TestServer_SynthesisEnabled_ExemplarWithTextBody(t *testing.T) {
+	store := NewMemoryStore()
+	storeExemplarTape(t, store, "GET", "/greet/:name", 200,
+		"Hello, {{pathParam.name}}!",
+		http.Header{"Content-Type": {"text/plain"}})
+
+	srv, err := NewServer(store, WithSynthesis())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/greet/Alice", nil)
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	want := "Hello, Alice!"
+	if got := rec.Body.String(); got != want {
+		t.Errorf("body = %q, want %q", got, want)
+	}
+}
+
+func TestServer_SynthesisEnabled_PatternWithNoParams(t *testing.T) {
+	store := NewMemoryStore()
+	// An exemplar with a pattern that has no parameters (effectively exact path).
+	storeExemplarTape(t, store, "GET", "/api/health", 200,
+		`{"status":"ok"}`,
+		http.Header{"Content-Type": {"application/json"}})
+
+	srv, err := NewServer(store, WithSynthesis())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/api/health", nil)
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	want := `{"status":"ok"}`
+	if got := rec.Body.String(); got != want {
+		t.Errorf("body = %s, want %s", got, want)
+	}
+}

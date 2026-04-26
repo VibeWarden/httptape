@@ -32,6 +32,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **`ResolveTemplateBodySimple`**: backward-compatible wrapper for template
   resolution using only request data. (#196)
 
+- **Synthesis mode**: exemplar tapes with URL patterns and template expressions
+  generate responses for unmatched URLs. Opt-in via `WithSynthesis()` (library)
+  or `--synthesize` (CLI). Exemplar tapes use `"exemplar": true` and
+  `"url_pattern"` fields. Two-phase match: exact tapes first, exemplar fallback
+  second. (#199, ADR-43)
+
+- **Type coercion**: `| int`, `| float`, `| bool` coercion pipes in JSON
+  template expressions convert resolved strings to native JSON types. Only
+  effective in JSON response bodies of exemplar tapes. (#199)
+
+- **`ValidateTape` / `ValidateExemplar`**: structural validation for tapes,
+  including exemplar-specific constraints (url_pattern required, SSE not
+  supported, mutual exclusivity with url). (#199)
+
+- **Startup tape validation**: the CLI `serve` command validates all loaded
+  tapes at startup. Invalid exemplar tapes produce a startup error. (#199)
+
 - **Config support for `path_pattern`**: declarative `"type": "path_pattern"`
   criterion with `"pattern"` field. (#196)
 

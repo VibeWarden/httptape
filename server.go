@@ -33,6 +33,7 @@ type Server struct {
 	sseTiming        SSETimingMode       // controls SSE replay inter-event timing
 	counters         *counterState       // per-server counter state for {{counter}}
 	randSource       io.Reader           // randomness source for template helpers
+	synthesis        bool                // if true, exemplar tapes are consulted on miss
 }
 
 // ServerOption configures a Server.
@@ -124,6 +125,22 @@ func WithReplayHeaders(key, value string) ServerOption {
 //   - SSETimingInstant(): emit all events immediately, no delay
 func WithSSETiming(mode SSETimingMode) ServerOption {
 	return func(s *Server) { s.sseTiming = mode }
+}
+
+// WithSynthesis enables synthesis mode on the Server. When enabled, requests
+// that don't match any exact-URL tape fall back to exemplar tapes -- tapes
+// with Exemplar: true and a URLPattern. The exemplar's response body is
+// rendered using template helpers (path params, fakers, etc.) to produce a
+// unique, deterministic response.
+//
+// Synthesis is disabled by default. When disabled, exemplar tapes are loaded
+// but never consulted, ensuring integration tests are not affected by
+// exemplar tapes in the fixture directory.
+//
+// Requires that tapes are loaded from a store that includes exemplar fixtures.
+// Exemplar tapes must pass validation (see ValidateExemplar).
+func WithSynthesis() ServerOption {
+	return func(s *Server) { s.synthesis = true }
 }
 
 // WithTemplating controls whether Mustache-style {{request.*}} template
@@ -287,10 +304,29 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 4. Find a matching tape.
-	tape, ok := s.matcher.Match(r, tapes)
+	// 4. Partition tapes into exact and exemplar sets.
+	// When synthesis is disabled, exemplar tapes are explicitly filtered out
+	// to guarantee they are inert regardless of matcher configuration.
+	var exactTapes, exemplarTapes []Tape
+	for _, t := range tapes {
+		if t.Exemplar {
+			exemplarTapes = append(exemplarTapes, t)
+		} else {
+			exactTapes = append(exactTapes, t)
+		}
+	}
 
-	// 5. No match.
+	// 5. Phase 1 -- exact match.
+	tape, ok := s.matcher.Match(r, exactTapes)
+
+	// 6. Phase 2 -- exemplar fallback (only when synthesis is enabled and
+	// phase 1 found no match).
+	var pathParams map[string]string
+	if !ok && s.synthesis && len(exemplarTapes) > 0 {
+		tape, pathParams, ok = s.matchExemplar(r, exemplarTapes)
+	}
+
+	// 7. No match at all.
 	if !ok {
 		if s.onNoMatch != nil {
 			s.onNoMatch(r)
@@ -300,7 +336,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 6. Per-fixture error override.
+	// 8. Per-fixture error override.
 	if tape.Metadata != nil {
 		if raw, ok := tape.Metadata["error"]; ok {
 			if errMap, ok := raw.(map[string]any); ok {
@@ -319,7 +355,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 7. Delay (global or per-fixture override).
+	// 9. Delay (global or per-fixture override).
 	effectiveDelay := s.delay
 	if tape.Metadata != nil {
 		if raw, ok := tape.Metadata["delay"]; ok {
@@ -342,27 +378,29 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 8. Check if this is an SSE tape — SSE responses stream events verbatim
+	// 10. Check if this is an SSE tape -- SSE responses stream events verbatim
 	// (no templating, no replay-header injection on the body path).
 	if tape.Response.IsSSE() {
 		s.serveSSE(w, r, tape)
 		return
 	}
 
-	// 9. Templating -- resolve {{...}} expressions in non-SSE response
+	// 11. Templating -- resolve {{...}} expressions in non-SSE response
 	// body and headers.
 	respBody := tape.Response.Body
 	respHeaders := tape.Response.Headers
 	if s.templating {
 		reqBody := readRequestBody(r)
 
-		// Extract path params from PathPatternCriterion if present.
-		var pathParams map[string]string
-		if cm, ok := s.matcher.(*CompositeMatcher); ok {
-			for _, criterion := range cm.criteria {
-				if ppc, ok := criterion.(*PathPatternCriterion); ok {
-					pathParams = ppc.ExtractParams(r.URL.Path)
-					break
+		// For non-exemplar tapes, extract path params from the matcher's
+		// PathPatternCriterion if present (existing behavior from #196).
+		if pathParams == nil {
+			if cm, ok := s.matcher.(*CompositeMatcher); ok {
+				for _, criterion := range cm.criteria {
+					if ppc, ok := criterion.(*PathPatternCriterion); ok {
+						pathParams = ppc.ExtractParams(r.URL.Path)
+						break
+					}
 				}
 			}
 		}
@@ -376,8 +414,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			randSource: s.randSource,
 		}
 
-		var err error
-		respBody, err = ResolveTemplateBody(respBody, ctx, s.strictTemplating)
+		// For exemplar tapes with JSON Content-Type, use JSON-aware resolution
+		// with type coercion support.
+		if tape.Exemplar {
+			respBody, err = resolveExemplarBody(respBody, tape.Response.Headers, ctx, s.strictTemplating)
+		} else {
+			respBody, err = ResolveTemplateBody(respBody, ctx, s.strictTemplating)
+		}
 		if err != nil {
 			w.Header().Set("X-Httptape-Error", "template")
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -391,22 +434,110 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 10. Write the matched tape's response.
-	// 10a: copy response headers (clone slices to prevent aliasing with tape data).
+	// 12. Write the matched tape's response.
+	// 12a: copy response headers (clone slices to prevent aliasing with tape data).
 	for key, values := range respHeaders {
 		w.Header()[key] = append([]string(nil), values...)
 	}
-	// 9b: apply replay header overrides (if any).
+	// 12b: apply replay header overrides (if any).
 	for key, value := range s.replayHeaders {
 		w.Header().Set(key, value)
 	}
-	// 10c: remove Content-Length — the recorded value may be stale if the body
+	// 12c: remove Content-Length -- the recorded value may be stale if the body
 	// was modified by sanitization or templating. Let net/http set it from the actual body.
 	w.Header().Del("Content-Length")
-	// 10d: write status code.
+	// 12d: write status code.
 	w.WriteHeader(tape.Response.StatusCode)
-	// 10e: write body.
+	// 12e: write body.
 	w.Write(respBody) //nolint:errcheck // response write failure is not actionable
+}
+
+// matchExemplar searches for the best-matching exemplar tape for the given
+// request. For each exemplar, it builds a PathPatternCriterion from the
+// tape's URLPattern, tests the incoming request path against it, and also
+// runs the server's other configured criteria (method, headers, body_fuzzy,
+// etc.) to ensure the exemplar matches all dimensions.
+//
+// Returns the best-matching tape, captured path parameters, and true, or
+// (Tape{}, nil, false) if no exemplar matches.
+func (s *Server) matchExemplar(r *http.Request, exemplars []Tape) (Tape, map[string]string, bool) {
+	type match struct {
+		tape      Tape
+		params    map[string]string
+		score     int
+		declOrder int
+	}
+
+	var best *match
+
+	// Extract non-path criteria from the server's matcher for secondary scoring.
+	var otherCriteria []Criterion
+	if cm, ok := s.matcher.(*CompositeMatcher); ok {
+		for _, c := range cm.criteria {
+			switch c.(type) {
+			case PathCriterion, *PathCriterion, *PathPatternCriterion, *PathRegexCriterion:
+				// Skip path-related criteria -- we use our own PathPatternCriterion.
+			default:
+				otherCriteria = append(otherCriteria, c)
+			}
+		}
+	}
+
+	for i, exemplar := range exemplars {
+		ppc, err := NewPathPatternCriterion(exemplar.Request.URLPattern)
+		if err != nil {
+			continue // invalid pattern: skip silently
+		}
+
+		// Test if the request path matches the exemplar's pattern.
+		params := ppc.ExtractParams(r.URL.Path)
+		if params == nil && len(ppc.paramNames) > 0 {
+			// Pattern has parameters but didn't match.
+			if !ppc.re.MatchString(r.URL.Path) {
+				continue
+			}
+		} else if params == nil {
+			// Pattern has no parameters -- check exact regex match.
+			if !ppc.re.MatchString(r.URL.Path) {
+				continue
+			}
+			params = map[string]string{}
+		}
+
+		// Score the path match using the PathPatternCriterion's score logic.
+		// We create a temporary tape with the URL set to the request path so
+		// that the criterion's Score method can compare.
+		pathScore := 3 // PathPatternCriterion always returns 3 on match
+
+		// Run other criteria against the exemplar. The exemplar must pass all.
+		totalScore := pathScore
+		eliminated := false
+		for _, c := range otherCriteria {
+			score := c.Score(r, exemplar)
+			if score == 0 {
+				eliminated = true
+				break
+			}
+			totalScore += score
+		}
+		if eliminated {
+			continue
+		}
+
+		if best == nil || totalScore > best.score || (totalScore == best.score && i < best.declOrder) {
+			best = &match{
+				tape:      exemplar,
+				params:    params,
+				score:     totalScore,
+				declOrder: i,
+			}
+		}
+	}
+
+	if best == nil {
+		return Tape{}, nil, false
+	}
+	return best.tape, best.params, true
 }
 
 // serveSSE handles SSE tape replay. It writes response headers, then

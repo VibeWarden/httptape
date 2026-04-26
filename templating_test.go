@@ -1364,3 +1364,397 @@ func TestFindMatchingClose(t *testing.T) {
 		})
 	}
 }
+
+// --- ADR-43: Type coercion tests ---
+
+func TestParseCoercion(t *testing.T) {
+	tests := []struct {
+		name     string
+		raw      string
+		wantExpr string
+		wantType string
+		wantOK   bool
+	}{
+		{
+			name:     "int coercion",
+			raw:      "pathParam.id | int",
+			wantExpr: "pathParam.id",
+			wantType: "int",
+			wantOK:   true,
+		},
+		{
+			name:     "float coercion",
+			raw:      "request.query.price | float",
+			wantExpr: "request.query.price",
+			wantType: "float",
+			wantOK:   true,
+		},
+		{
+			name:     "bool coercion",
+			raw:      "request.query.active | bool",
+			wantExpr: "request.query.active",
+			wantType: "bool",
+			wantOK:   true,
+		},
+		{
+			name:     "no coercion",
+			raw:      "pathParam.id",
+			wantExpr: "pathParam.id",
+			wantType: "",
+			wantOK:   false,
+		},
+		{
+			name:     "faker with seed (no coercion)",
+			raw:      "faker.name seed=foo",
+			wantExpr: "faker.name seed=foo",
+			wantType: "",
+			wantOK:   false,
+		},
+		{
+			name:     "unknown coercion type treated as no coercion",
+			raw:      "pathParam.id | string",
+			wantExpr: "pathParam.id | string",
+			wantType: "",
+			wantOK:   false,
+		},
+		{
+			name:     "faker with coercion",
+			raw:      "faker.randomInt seed=x min=1 max=100 | int",
+			wantExpr: "faker.randomInt seed=x min=1 max=100",
+			wantType: "int",
+			wantOK:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotExpr, gotType, gotOK := parseCoercion(tt.raw)
+			if gotExpr != tt.wantExpr {
+				t.Errorf("parseCoercion(%q) expr = %q, want %q", tt.raw, gotExpr, tt.wantExpr)
+			}
+			if gotType != tt.wantType {
+				t.Errorf("parseCoercion(%q) type = %q, want %q", tt.raw, gotType, tt.wantType)
+			}
+			if gotOK != tt.wantOK {
+				t.Errorf("parseCoercion(%q) ok = %v, want %v", tt.raw, gotOK, tt.wantOK)
+			}
+		})
+	}
+}
+
+func TestCoerceValue(t *testing.T) {
+	tests := []struct {
+		name     string
+		s        string
+		coercion string
+		want     any
+		wantErr  bool
+	}{
+		{name: "int from integer string", s: "42", coercion: "int", want: float64(42)},
+		{name: "int from float string truncates", s: "42.7", coercion: "int", want: float64(42)},
+		{name: "int from invalid string", s: "abc", coercion: "int", wantErr: true},
+		{name: "float from valid string", s: "19.99", coercion: "float", want: float64(19.99)},
+		{name: "float from integer string", s: "42", coercion: "float", want: float64(42)},
+		{name: "float from invalid string", s: "xyz", coercion: "float", wantErr: true},
+		{name: "bool from true", s: "true", coercion: "bool", want: true},
+		{name: "bool from false", s: "false", coercion: "bool", want: false},
+		{name: "bool from 1", s: "1", coercion: "bool", want: true},
+		{name: "bool from invalid string", s: "maybe", coercion: "bool", wantErr: true},
+		{name: "unknown coercion returns string", s: "hello", coercion: "unknown", want: "hello"},
+		{name: "int with whitespace", s: " 42 ", coercion: "int", want: float64(42)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := coerceValue(tt.s, tt.coercion)
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("coerceValue(%q, %q) = %v, want error", tt.s, tt.coercion, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("coerceValue(%q, %q) unexpected error: %v", tt.s, tt.coercion, err)
+			}
+			if got != tt.want {
+				t.Errorf("coerceValue(%q, %q) = %v (%T), want %v (%T)", tt.s, tt.coercion, got, got, tt.want, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveTemplateJSONWithCoercion_Object(t *testing.T) {
+	ctx := &templateCtx{
+		req:        httptest.NewRequest("GET", "/users/alice", nil),
+		pathParams: map[string]string{"name": "alice"},
+		randSource: bytes.NewReader(make([]byte, 256)),
+	}
+
+	body := []byte(`{"name":"{{pathParam.name}}"}`)
+	got, err := resolveTemplateJSONWithCoercion(body, ctx, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	want := `{"name":"alice"}`
+	if string(got) != want {
+		t.Errorf("got %s, want %s", got, want)
+	}
+}
+
+func TestResolveTemplateJSONWithCoercion_NestedObject(t *testing.T) {
+	ctx := &templateCtx{
+		req:        httptest.NewRequest("GET", "/users/42", nil),
+		pathParams: map[string]string{"id": "42"},
+		randSource: bytes.NewReader(make([]byte, 256)),
+	}
+
+	body := []byte(`{"user":{"id":"{{pathParam.id | int}}"}}`)
+	got, err := resolveTemplateJSONWithCoercion(body, ctx, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	want := `{"user":{"id":42}}`
+	if string(got) != want {
+		t.Errorf("got %s, want %s", got, want)
+	}
+}
+
+func TestResolveTemplateJSONWithCoercion_Array(t *testing.T) {
+	ctx := &templateCtx{
+		req:        httptest.NewRequest("GET", "/users/1", nil),
+		pathParams: map[string]string{"id": "1"},
+		randSource: bytes.NewReader(make([]byte, 256)),
+	}
+
+	body := []byte(`[{"id":"{{pathParam.id | int}}"}]`)
+	got, err := resolveTemplateJSONWithCoercion(body, ctx, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	want := `[{"id":1}]`
+	if string(got) != want {
+		t.Errorf("got %s, want %s", got, want)
+	}
+}
+
+func TestResolveTemplateJSONWithCoercion_NonStringLeaf(t *testing.T) {
+	ctx := &templateCtx{
+		req:        httptest.NewRequest("GET", "/", nil),
+		randSource: bytes.NewReader(make([]byte, 256)),
+	}
+
+	body := []byte(`{"count":5,"active":true}`)
+	got, err := resolveTemplateJSONWithCoercion(body, ctx, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	want := `{"active":true,"count":5}`
+	if string(got) != want {
+		t.Errorf("got %s, want %s", got, want)
+	}
+}
+
+func TestResolveTemplateJSONWithCoercion_MixedContent(t *testing.T) {
+	ctx := &templateCtx{
+		req:        httptest.NewRequest("GET", "/users/alice", nil),
+		pathParams: map[string]string{"name": "alice"},
+		randSource: bytes.NewReader(make([]byte, 256)),
+	}
+
+	body := []byte(`{"greeting":"Hello, {{pathParam.name}}!"}`)
+	got, err := resolveTemplateJSONWithCoercion(body, ctx, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	want := `{"greeting":"Hello, alice!"}`
+	if string(got) != want {
+		t.Errorf("got %s, want %s", got, want)
+	}
+}
+
+func TestResolveTemplateJSONWithCoercion_CoercionInt(t *testing.T) {
+	ctx := &templateCtx{
+		req:        httptest.NewRequest("GET", "/users/42", nil),
+		pathParams: map[string]string{"id": "42"},
+		randSource: bytes.NewReader(make([]byte, 256)),
+	}
+
+	body := []byte(`{"id":"{{pathParam.id | int}}"}`)
+	got, err := resolveTemplateJSONWithCoercion(body, ctx, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// The value should be a JSON number, not a string.
+	want := `{"id":42}`
+	if string(got) != want {
+		t.Errorf("got %s, want %s", got, want)
+	}
+}
+
+func TestResolveTemplateJSONWithCoercion_CoercionFloat(t *testing.T) {
+	ctx := &templateCtx{
+		req:        httptest.NewRequest("GET", "/items?price=19.99", nil),
+		randSource: bytes.NewReader(make([]byte, 256)),
+	}
+
+	body := []byte(`{"price":"{{request.query.price | float}}"}`)
+	got, err := resolveTemplateJSONWithCoercion(body, ctx, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	want := `{"price":19.99}`
+	if string(got) != want {
+		t.Errorf("got %s, want %s", got, want)
+	}
+}
+
+func TestResolveTemplateJSONWithCoercion_CoercionBool(t *testing.T) {
+	ctx := &templateCtx{
+		req:        httptest.NewRequest("GET", "/items?active=true", nil),
+		randSource: bytes.NewReader(make([]byte, 256)),
+	}
+
+	body := []byte(`{"active":"{{request.query.active | bool}}"}`)
+	got, err := resolveTemplateJSONWithCoercion(body, ctx, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	want := `{"active":true}`
+	if string(got) != want {
+		t.Errorf("got %s, want %s", got, want)
+	}
+}
+
+func TestResolveTemplateJSONWithCoercion_CoercionFailure_Strict(t *testing.T) {
+	ctx := &templateCtx{
+		req:        httptest.NewRequest("GET", "/users/abc", nil),
+		pathParams: map[string]string{"id": "abc"},
+		randSource: bytes.NewReader(make([]byte, 256)),
+	}
+
+	body := []byte(`{"id":"{{pathParam.id | int}}"}`)
+	_, err := resolveTemplateJSONWithCoercion(body, ctx, true)
+	if err == nil {
+		t.Error("expected error for strict coercion failure, got nil")
+	}
+}
+
+func TestResolveTemplateJSONWithCoercion_CoercionFailure_Lenient(t *testing.T) {
+	ctx := &templateCtx{
+		req:        httptest.NewRequest("GET", "/users/abc", nil),
+		pathParams: map[string]string{"id": "abc"},
+		randSource: bytes.NewReader(make([]byte, 256)),
+	}
+
+	body := []byte(`{"id":"{{pathParam.id | int}}"}`)
+	got, err := resolveTemplateJSONWithCoercion(body, ctx, false)
+	if err != nil {
+		t.Fatalf("unexpected error in lenient mode: %v", err)
+	}
+
+	// Lenient mode: uncoerced string value is emitted.
+	want := `{"id":"abc"}`
+	if string(got) != want {
+		t.Errorf("got %s, want %s", got, want)
+	}
+}
+
+func TestResolveTemplateJSONWithCoercion_NoTemplates(t *testing.T) {
+	ctx := &templateCtx{
+		req:        httptest.NewRequest("GET", "/", nil),
+		randSource: bytes.NewReader(make([]byte, 256)),
+	}
+
+	body := []byte(`{"id":1,"name":"Alice"}`)
+	got, err := resolveTemplateJSONWithCoercion(body, ctx, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// JSON keys are sorted by Go's json.Marshal.
+	want := `{"id":1,"name":"Alice"}`
+	if string(got) != want {
+		t.Errorf("got %s, want %s", got, want)
+	}
+}
+
+func TestResolveExemplarBody_JSON(t *testing.T) {
+	ctx := &templateCtx{
+		req:        httptest.NewRequest("GET", "/users/42", nil),
+		pathParams: map[string]string{"id": "42"},
+		randSource: bytes.NewReader(make([]byte, 256)),
+	}
+
+	headers := http.Header{"Content-Type": {"application/json"}}
+	body := []byte(`{"id":"{{pathParam.id | int}}","name":"{{pathParam.id}}"}`)
+	got, err := resolveExemplarBody(body, headers, ctx, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	want := `{"id":42,"name":"42"}`
+	if string(got) != want {
+		t.Errorf("got %s, want %s", got, want)
+	}
+}
+
+func TestResolveExemplarBody_Text(t *testing.T) {
+	ctx := &templateCtx{
+		req:        httptest.NewRequest("GET", "/users/42", nil),
+		pathParams: map[string]string{"id": "42"},
+		randSource: bytes.NewReader(make([]byte, 256)),
+	}
+
+	headers := http.Header{"Content-Type": {"text/plain"}}
+	body := []byte("User ID: {{pathParam.id}}")
+	got, err := resolveExemplarBody(body, headers, ctx, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	want := "User ID: 42"
+	if string(got) != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestResolveExemplarBody_Binary_NoResolution(t *testing.T) {
+	ctx := &templateCtx{
+		req:        httptest.NewRequest("GET", "/", nil),
+		randSource: bytes.NewReader(make([]byte, 256)),
+	}
+
+	headers := http.Header{"Content-Type": {"image/png"}}
+	body := []byte{0x89, 0x50, 0x4E, 0x47}
+	got, err := resolveExemplarBody(body, headers, ctx, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !bytes.Equal(got, body) {
+		t.Errorf("binary body should be unchanged, got %v, want %v", got, body)
+	}
+}
+
+func TestResolveExemplarBody_EmptyBody(t *testing.T) {
+	ctx := &templateCtx{
+		req:        httptest.NewRequest("GET", "/", nil),
+		randSource: bytes.NewReader(make([]byte, 256)),
+	}
+
+	got, err := resolveExemplarBody(nil, nil, ctx, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != nil {
+		t.Errorf("expected nil body, got %v", got)
+	}
+}

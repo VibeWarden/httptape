@@ -35,6 +35,16 @@ type Tape struct {
 	// configuration (e.g., delay, error simulation). Not used for
 	// matching. Values are preserved through JSON round-trip.
 	Metadata map[string]any `json:"metadata,omitempty"`
+
+	// Exemplar marks this tape as a pattern-based template for synthesis mode.
+	// When true, the tape's request uses URLPattern instead of URL, and the
+	// response body may contain template expressions that are resolved at
+	// serve time using captured path parameters and other template helpers.
+	//
+	// Exemplar tapes are only consulted when the server has synthesis enabled
+	// (WithSynthesis option). When synthesis is disabled, exemplar tapes are
+	// loaded but ignored.
+	Exemplar bool `json:"exemplar,omitempty"`
 }
 
 // RecordedReq captures the essential parts of an HTTP request for matching and replay.
@@ -51,6 +61,16 @@ type RecordedReq struct {
 
 	// URL is the full request URL as a string.
 	URL string `json:"url"`
+
+	// URLPattern is a colon-prefixed path pattern (e.g., "/users/:id") used
+	// by exemplar tapes for pattern-based matching. Mutually exclusive with
+	// URL: a tape must have either URL (exact match) or URLPattern (pattern
+	// match via PathPatternCriterion), never both.
+	//
+	// Only meaningful when the parent Tape has Exemplar set to true.
+	// Validation enforces: Exemplar==true requires URLPattern!="",
+	// and URLPattern!="" requires Exemplar==true.
+	URLPattern string `json:"url_pattern,omitempty"`
 
 	// Headers contains the request headers. Only non-sensitive headers are stored
 	// after sanitization (handled by the sanitizer, not by this type).
@@ -124,6 +144,7 @@ func (r RecordedReq) MarshalJSON() ([]byte, error) {
 	type alias struct {
 		Method           string      `json:"method"`
 		URL              string      `json:"url"`
+		URLPattern       string      `json:"url_pattern,omitempty"`
 		Headers          http.Header `json:"headers"`
 		Body             any         `json:"body"`
 		BodyHash         string      `json:"body_hash"`
@@ -134,6 +155,7 @@ func (r RecordedReq) MarshalJSON() ([]byte, error) {
 	a := alias{
 		Method:           r.Method,
 		URL:              r.URL,
+		URLPattern:       r.URLPattern,
 		Headers:          r.Headers,
 		Body:             nil, // default: null
 		BodyHash:         r.BodyHash,
@@ -154,6 +176,7 @@ func (r *RecordedReq) UnmarshalJSON(data []byte) error {
 	type alias struct {
 		Method           string          `json:"method"`
 		URL              string          `json:"url"`
+		URLPattern       string          `json:"url_pattern,omitempty"`
 		Headers          http.Header     `json:"headers"`
 		Body             json.RawMessage `json:"body"`
 		BodyHash         string          `json:"body_hash"`
@@ -168,6 +191,7 @@ func (r *RecordedReq) UnmarshalJSON(data []byte) error {
 
 	r.Method = a.Method
 	r.URL = a.URL
+	r.URLPattern = a.URLPattern
 	r.Headers = a.Headers
 	r.BodyHash = a.BodyHash
 	r.Truncated = a.Truncated
@@ -186,7 +210,7 @@ func (r *RecordedReq) UnmarshalJSON(data []byte) error {
 // (same rules as RecordedReq.MarshalJSON).
 func (r RecordedResp) MarshalJSON() ([]byte, error) {
 	type alias struct {
-		StatusCode       int        `json:"status_code"`
+		StatusCode       int         `json:"status_code"`
 		Headers          http.Header `json:"headers"`
 		Body             any         `json:"body"`
 		Truncated        bool        `json:"truncated,omitempty"`
@@ -357,6 +381,53 @@ func NewTape(route string, req RecordedReq, resp RecordedResp) Tape {
 		Request:    req,
 		Response:   resp,
 	}
+}
+
+// ValidateTape checks a tape for structural validity. Currently validates
+// exemplar-specific constraints via ValidateExemplar. Returns nil if valid.
+func ValidateTape(t Tape) error {
+	return ValidateExemplar(t)
+}
+
+// ValidateExemplar checks that a tape marked as an exemplar is structurally
+// valid. Returns nil if the tape is valid, or an error describing the issue.
+//
+// Validation rules:
+//   - Exemplar==true requires URLPattern to be non-empty.
+//   - Exemplar==true requires URL to be empty.
+//   - URLPattern is only valid when Exemplar==true.
+//   - SSE exemplars (Exemplar==true with non-empty SSEEvents) are not
+//     supported and produce an error.
+//   - Non-exemplar tapes with URLPattern set produce an error.
+//   - URL and URLPattern set simultaneously produce an error.
+//
+// ValidateExemplar does not validate the URLPattern syntax -- that is the
+// responsibility of PathPatternCriterion.
+func ValidateExemplar(t Tape) error {
+	hasURL := t.Request.URL != ""
+	hasPattern := t.Request.URLPattern != ""
+
+	if hasURL && hasPattern {
+		return fmt.Errorf("httptape: tape %s: url and url_pattern are mutually exclusive", t.ID)
+	}
+
+	if t.Exemplar {
+		if !hasPattern {
+			return fmt.Errorf("httptape: exemplar tape %s: url_pattern is required", t.ID)
+		}
+		if hasURL {
+			return fmt.Errorf("httptape: exemplar tape %s: url and url_pattern are mutually exclusive", t.ID)
+		}
+		if len(t.Response.SSEEvents) > 0 {
+			return fmt.Errorf("httptape: exemplar tape %s: SSE exemplars are not supported", t.ID)
+		}
+	}
+
+	if hasPattern && !t.Exemplar {
+		return fmt.Errorf("httptape: tape %s: url_pattern requires exemplar to be true", t.ID)
+	}
+
+	return nil
 }
 
 // BodyHashFromBytes computes the hex-encoded SHA-256 hash of the given bytes.

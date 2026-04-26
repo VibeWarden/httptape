@@ -14,9 +14,12 @@ type Tape struct {
     Request    RecordedReq    `json:"request"`
     Response   RecordedResp   `json:"response"`
     Metadata   map[string]any `json:"metadata,omitempty"`
+    Exemplar   bool           `json:"exemplar,omitempty"`
 }
 
 func NewTape(route string, req RecordedReq, resp RecordedResp) Tape
+func ValidateTape(t Tape) error
+func ValidateExemplar(t Tape) error
 ```
 
 ### RecordedReq
@@ -25,6 +28,7 @@ func NewTape(route string, req RecordedReq, resp RecordedResp) Tape
 type RecordedReq struct {
     Method           string      `json:"method"`
     URL              string      `json:"url"`
+    URLPattern       string      `json:"url_pattern,omitempty"`
     Headers          http.Header `json:"headers"`
     Body             []byte      `json:"-"`
     BodyHash         string      `json:"body_hash"`
@@ -195,8 +199,9 @@ Returns an error if option values are invalid. Panics if `store` is nil.
 | WithDelay | `WithDelay(d time.Duration)` | `0` |
 | WithErrorRate | `WithErrorRate(rate float64)` | `0.0` |
 | WithReplayHeaders | `WithReplayHeaders(key, value string)` | none |
+| WithSynthesis | `WithSynthesis()` | disabled |
 
-**Details:** [Replay](replay.md)
+**Details:** [Replay](replay.md), [Synthesis](synthesis.md)
 
 ---
 
