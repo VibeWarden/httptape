@@ -94,13 +94,13 @@ func SSETimingRealtime() SSETimingMode {
 }
 
 // SSETimingAccelerated returns an SSETimingMode that divides all
-// inter-event gaps by the given factor. Factor must be > 0; panics
-// otherwise (constructor guard).
-func SSETimingAccelerated(factor float64) SSETimingMode {
+// inter-event gaps by the given factor. Factor must be > 0; returns an
+// error otherwise.
+func SSETimingAccelerated(factor float64) (SSETimingMode, error) {
 	if factor <= 0 {
-		panic("httptape: SSETimingAccelerated factor must be > 0")
+		return nil, fmt.Errorf("httptape: SSETimingAccelerated factor must be > 0, got %g", factor)
 	}
-	return sseTimingAccelerated{factor: factor}
+	return sseTimingAccelerated{factor: factor}, nil
 }
 
 // SSETimingInstant returns an SSETimingMode that emits all events

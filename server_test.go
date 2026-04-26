@@ -35,10 +35,14 @@ func storeTape(t *testing.T, store *MemoryStore, method, path string, status int
 // errListStore is a Store implementation whose List always returns an error.
 type errListStore struct{}
 
-func (f *errListStore) Save(_ context.Context, _ Tape) error            { return errors.New("fail") }
-func (f *errListStore) Load(_ context.Context, _ string) (Tape, error)  { return Tape{}, errors.New("fail") }
-func (f *errListStore) List(_ context.Context, _ Filter) ([]Tape, error) { return nil, errors.New("fail") }
-func (f *errListStore) Delete(_ context.Context, _ string) error        { return errors.New("fail") }
+func (f *errListStore) Save(_ context.Context, _ Tape) error { return errors.New("fail") }
+func (f *errListStore) Load(_ context.Context, _ string) (Tape, error) {
+	return Tape{}, errors.New("fail")
+}
+func (f *errListStore) List(_ context.Context, _ Filter) ([]Tape, error) {
+	return nil, errors.New("fail")
+}
+func (f *errListStore) Delete(_ context.Context, _ string) error { return errors.New("fail") }
 
 func TestServer_BasicReplay(t *testing.T) {
 	store := NewMemoryStore()
@@ -46,7 +50,10 @@ func TestServer_BasicReplay(t *testing.T) {
 		"Content-Type": {"application/json"},
 	})
 
-	srv := NewServer(store)
+	srv, err := NewServer(store)
+	if err != nil {
+		t.Fatal(err)
+	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/users", nil)
 
@@ -70,7 +77,10 @@ func TestServer_ResponseHeaders(t *testing.T) {
 		"X-Custom":   {"val"},
 	})
 
-	srv := NewServer(store)
+	srv, err := NewServer(store)
+	if err != nil {
+		t.Fatal(err)
+	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/cookies", nil)
 
@@ -90,7 +100,10 @@ func TestServer_ResponseHeaders(t *testing.T) {
 
 func TestServer_NoMatch_DefaultFallback(t *testing.T) {
 	store := NewMemoryStore()
-	srv := NewServer(store)
+	srv, err := NewServer(store)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/nonexistent", nil)
@@ -107,10 +120,13 @@ func TestServer_NoMatch_DefaultFallback(t *testing.T) {
 
 func TestServer_NoMatch_CustomFallback(t *testing.T) {
 	store := NewMemoryStore()
-	srv := NewServer(store,
+	srv, err := NewServer(store,
 		WithFallbackStatus(http.StatusServiceUnavailable),
 		WithFallbackBody([]byte("custom fallback")),
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/missing", nil)
@@ -131,12 +147,15 @@ func TestServer_NoMatch_Callback(t *testing.T) {
 	var capturedPath string
 	var mu sync.Mutex
 
-	srv := NewServer(store, WithOnNoMatch(func(r *http.Request) {
+	srv, err := NewServer(store, WithOnNoMatch(func(r *http.Request) {
 		called.Add(1)
 		mu.Lock()
 		capturedPath = r.URL.Path
 		mu.Unlock()
 	}))
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/unmatched", nil)
@@ -171,7 +190,10 @@ func TestNewServer_NilStore_Panics(t *testing.T) {
 }
 
 func TestServer_StoreError(t *testing.T) {
-	srv := NewServer(&errListStore{})
+	srv, err := NewServer(&errListStore{})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/anything", nil)
@@ -203,7 +225,10 @@ func TestServer_CustomMatcher(t *testing.T) {
 		return Tape{}, false
 	})
 
-	srv := NewServer(store, WithMatcher(customMatcher))
+	srv, err := NewServer(store, WithMatcher(customMatcher))
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Request with matching header.
 	rec := httptest.NewRecorder()
@@ -233,7 +258,10 @@ func TestServer_ExactMatcher_MethodMismatch(t *testing.T) {
 	store := NewMemoryStore()
 	storeTape(t, store, "GET", "/api/data", 200, "data", nil)
 
-	srv := NewServer(store)
+	srv, err := NewServer(store)
+	if err != nil {
+		t.Fatal(err)
+	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/api/data", nil)
 
@@ -248,7 +276,10 @@ func TestServer_ExactMatcher_PathMismatch(t *testing.T) {
 	store := NewMemoryStore()
 	storeTape(t, store, "GET", "/foo", 200, "foo", nil)
 
-	srv := NewServer(store)
+	srv, err := NewServer(store)
+	if err != nil {
+		t.Fatal(err)
+	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/bar", nil)
 
@@ -261,7 +292,10 @@ func TestServer_ExactMatcher_PathMismatch(t *testing.T) {
 
 func TestServer_EmptyStore(t *testing.T) {
 	store := NewMemoryStore()
-	srv := NewServer(store)
+	srv, err := NewServer(store)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/anything", nil)
@@ -287,7 +321,10 @@ func TestServer_NilResponseBody(t *testing.T) {
 		t.Fatalf("save: %v", err)
 	}
 
-	srv := NewServer(store)
+	srv, err := NewServer(store)
+	if err != nil {
+		t.Fatal(err)
+	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/empty", nil)
 
@@ -306,7 +343,10 @@ func TestServer_ConcurrentRequests(t *testing.T) {
 	storeTape(t, store, "GET", "/a", 200, "response-a", nil)
 	storeTape(t, store, "GET", "/b", 200, "response-b", nil)
 
-	srv := NewServer(store)
+	srv, err := NewServer(store)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	const goroutines = 20
 	var wg sync.WaitGroup
@@ -368,7 +408,10 @@ func TestServer_WithHTTPTestServer(t *testing.T) {
 		"Content-Type": {"application/json"},
 	})
 
-	srv := NewServer(store)
+	srv, err := NewServer(store)
+	if err != nil {
+		t.Fatal(err)
+	}
 	ts := httptest.NewServer(srv)
 	defer ts.Close()
 
@@ -435,7 +478,10 @@ func BenchmarkServerServeHTTP_ExactMatch(b *testing.B) {
 				b.Fatalf("Save: %v", err)
 			}
 
-			srv := NewServer(store)
+			srv, err := NewServer(store)
+			if err != nil {
+				b.Fatal(err)
+			}
 
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
@@ -527,7 +573,10 @@ func TestServer_Replay204NoContent(t *testing.T) {
 	store := NewMemoryStore()
 	storeTape(t, store, "DELETE", "/resource/1", 204, "", nil)
 
-	srv := NewServer(store)
+	srv, err := NewServer(store)
+	if err != nil {
+		t.Fatal(err)
+	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("DELETE", "/resource/1", nil)
 
@@ -558,7 +607,10 @@ func TestServer_ReplayBinaryBody(t *testing.T) {
 		t.Fatalf("save tape: %v", err)
 	}
 
-	srv := NewServer(store)
+	srv, err := NewServer(store)
+	if err != nil {
+		t.Fatal(err)
+	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/image.png", nil)
 
@@ -594,7 +646,10 @@ func TestServer_ReplayTruncatedBody(t *testing.T) {
 		t.Fatalf("save tape: %v", err)
 	}
 
-	srv := NewServer(store)
+	srv, err := NewServer(store)
+	if err != nil {
+		t.Fatal(err)
+	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/large", nil)
 
@@ -614,7 +669,10 @@ func TestServer_CORS_HeadersPresent(t *testing.T) {
 	store := NewMemoryStore()
 	storeTape(t, store, "GET", "/api/data", 200, "ok", nil)
 
-	srv := NewServer(store, WithCORS())
+	srv, err := NewServer(store, WithCORS())
+	if err != nil {
+		t.Fatal(err)
+	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/data", nil)
 
@@ -644,7 +702,10 @@ func TestServer_CORS_Disabled_NoHeaders(t *testing.T) {
 	store := NewMemoryStore()
 	storeTape(t, store, "GET", "/api/data", 200, "ok", nil)
 
-	srv := NewServer(store) // no WithCORS
+	srv, err := NewServer(store) // no WithCORS
+	if err != nil {
+		t.Fatal(err)
+	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/data", nil)
 
@@ -657,7 +718,10 @@ func TestServer_CORS_Disabled_NoHeaders(t *testing.T) {
 
 func TestServer_CORS_OptionsPreflight(t *testing.T) {
 	store := NewMemoryStore()
-	srv := NewServer(store, WithCORS())
+	srv, err := NewServer(store, WithCORS())
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("OPTIONS", "/api/data", nil)
@@ -677,7 +741,10 @@ func TestServer_CORS_OptionsPreflight(t *testing.T) {
 
 func TestServer_CORS_OptionsWithoutCORS(t *testing.T) {
 	store := NewMemoryStore()
-	srv := NewServer(store) // no WithCORS
+	srv, err := NewServer(store) // no WithCORS
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("OPTIONS", "/api/data", nil)
@@ -695,7 +762,10 @@ func TestServer_CORS_WithVariousMethods(t *testing.T) {
 	storeTape(t, store, "POST", "/api/data", 201, "created", nil)
 	storeTape(t, store, "DELETE", "/api/data", 204, "", nil)
 
-	srv := NewServer(store, WithCORS())
+	srv, err := NewServer(store, WithCORS())
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	methods := []struct {
 		method string
@@ -724,7 +794,10 @@ func TestServer_Delay_GlobalDelay(t *testing.T) {
 	store := NewMemoryStore()
 	storeTape(t, store, "GET", "/api/data", 200, "ok", nil)
 
-	srv := NewServer(store, WithDelay(50*time.Millisecond))
+	srv, err := NewServer(store, WithDelay(50*time.Millisecond))
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/data", nil)
@@ -745,7 +818,10 @@ func TestServer_Delay_ZeroDelay(t *testing.T) {
 	store := NewMemoryStore()
 	storeTape(t, store, "GET", "/api/data", 200, "ok", nil)
 
-	srv := NewServer(store, WithDelay(0))
+	srv, err := NewServer(store, WithDelay(0))
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/data", nil)
@@ -777,7 +853,10 @@ func TestServer_Delay_PerFixtureOverride(t *testing.T) {
 		t.Fatalf("save: %v", err)
 	}
 
-	srv := NewServer(store, WithDelay(1*time.Millisecond)) // global is 1ms
+	srv, err := NewServer(store, WithDelay(1*time.Millisecond)) // global is 1ms
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/slow", nil)
@@ -799,7 +878,10 @@ func TestServer_Delay_ContextCancellation(t *testing.T) {
 	store := NewMemoryStore()
 	storeTape(t, store, "GET", "/api/data", 200, "ok", nil)
 
-	srv := NewServer(store, WithDelay(5*time.Second)) // very long delay
+	srv, err := NewServer(store, WithDelay(5*time.Second)) // very long delay
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	rec := httptest.NewRecorder()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -826,7 +908,10 @@ func TestServer_Delay_ContextCancellation(t *testing.T) {
 func TestServer_Delay_NoDelayOnNoMatch(t *testing.T) {
 	store := NewMemoryStore() // empty store, no tapes
 
-	srv := NewServer(store, WithDelay(5*time.Second))
+	srv, err := NewServer(store, WithDelay(5*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/nonexistent", nil)
@@ -851,7 +936,10 @@ func TestServer_ErrorRate_Zero_NoErrors(t *testing.T) {
 	storeTape(t, store, "GET", "/api/data", 200, "ok", nil)
 
 	// randFloat always returns 0.5, but errorRate is 0 so it should never trigger.
-	srv := NewServer(store, withRandFloat(func() float64 { return 0.5 }))
+	srv, err := NewServer(store, withRandFloat(func() float64 { return 0.5 }))
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/data", nil)
@@ -867,10 +955,13 @@ func TestServer_ErrorRate_One_AllErrors(t *testing.T) {
 	storeTape(t, store, "GET", "/api/data", 200, "ok", nil)
 
 	// randFloat returns 0.5, errorRate is 1.0 so all requests fail.
-	srv := NewServer(store,
+	srv, err := NewServer(store,
 		WithErrorRate(1.0),
 		withRandFloat(func() float64 { return 0.5 }),
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/data", nil)
@@ -893,7 +984,7 @@ func TestServer_ErrorRate_Deterministic(t *testing.T) {
 
 	// Error rate 0.5: randFloat < 0.5 -> error, randFloat >= 0.5 -> success.
 	callCount := 0
-	srv := NewServer(store,
+	srv, err := NewServer(store,
 		WithErrorRate(0.5),
 		withRandFloat(func() float64 {
 			callCount++
@@ -903,6 +994,9 @@ func TestServer_ErrorRate_Deterministic(t *testing.T) {
 			return 0.9 // above rate -> success
 		}),
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// First request: error.
 	rec1 := httptest.NewRecorder()
@@ -925,11 +1019,14 @@ func TestServer_ErrorRate_WithCORS(t *testing.T) {
 	store := NewMemoryStore()
 	storeTape(t, store, "GET", "/api/data", 200, "ok", nil)
 
-	srv := NewServer(store,
+	srv, err := NewServer(store,
 		WithCORS(),
 		WithErrorRate(1.0),
 		withRandFloat(func() float64 { return 0.0 }),
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/data", nil)
@@ -944,7 +1041,7 @@ func TestServer_ErrorRate_WithCORS(t *testing.T) {
 	}
 }
 
-func TestServer_ErrorRate_InvalidPanics(t *testing.T) {
+func TestNewServer_InvalidErrorRate(t *testing.T) {
 	tests := []struct {
 		name string
 		rate float64
@@ -954,20 +1051,13 @@ func TestServer_ErrorRate_InvalidPanics(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			defer func() {
-				r := recover()
-				if r == nil {
-					t.Fatal("expected panic, got none")
-				}
-				msg, ok := r.(string)
-				if !ok {
-					t.Fatalf("expected string panic, got %T", r)
-				}
-				if !strings.Contains(msg, "between 0.0 and 1.0") {
-					t.Errorf("panic message = %q, want it to contain 'between 0.0 and 1.0'", msg)
-				}
-			}()
-			WithErrorRate(tt.rate)(&Server{})
+			_, err := NewServer(NewMemoryStore(), WithErrorRate(tt.rate))
+			if err == nil {
+				t.Fatal("expected error for invalid error rate, got nil")
+			}
+			if !strings.Contains(err.Error(), "between 0.0 and 1.0") {
+				t.Errorf("error = %q, want it to contain 'between 0.0 and 1.0'", err.Error())
+			}
 		})
 	}
 }
@@ -991,7 +1081,10 @@ func TestServer_PerFixtureError(t *testing.T) {
 		t.Fatalf("save: %v", err)
 	}
 
-	srv := NewServer(store)
+	srv, err := NewServer(store)
+	if err != nil {
+		t.Fatal(err)
+	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/broken", nil)
 	srv.ServeHTTP(rec, req)
@@ -1024,7 +1117,10 @@ func TestServer_PerFixtureError_DefaultStatus(t *testing.T) {
 		t.Fatalf("save: %v", err)
 	}
 
-	srv := NewServer(store)
+	srv, err := NewServer(store)
+	if err != nil {
+		t.Fatal(err)
+	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/err", nil)
 	srv.ServeHTTP(rec, req)
@@ -1053,7 +1149,10 @@ func TestServer_PerFixtureError_WithCORS(t *testing.T) {
 		t.Fatalf("save: %v", err)
 	}
 
-	srv := NewServer(store, WithCORS())
+	srv, err := NewServer(store, WithCORS())
+	if err != nil {
+		t.Fatal(err)
+	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/broken", nil)
 	srv.ServeHTTP(rec, req)
@@ -1094,9 +1193,12 @@ func TestServer_ReplayHeaders_Override(t *testing.T) {
 		"Content-Type":  {"application/json"},
 	})
 
-	srv := NewServer(store,
+	srv, err := NewServer(store,
 		WithReplayHeaders("Authorization", "Bearer injected-token"),
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/data", nil)
 
@@ -1118,11 +1220,14 @@ func TestServer_ReplayHeaders_Multiple(t *testing.T) {
 	store := NewMemoryStore()
 	storeTape(t, store, "GET", "/multi", 200, "ok", http.Header{})
 
-	srv := NewServer(store,
+	srv, err := NewServer(store,
 		WithReplayHeaders("X-Request-Id", "req-123"),
 		WithReplayHeaders("X-Trace-Id", "trace-456"),
 		WithReplayHeaders("Cache-Control", "no-store"),
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/multi", nil)
 
@@ -1131,7 +1236,7 @@ func TestServer_ReplayHeaders_Multiple(t *testing.T) {
 	tests := map[string]string{
 		"X-Request-Id":  "req-123",
 		"X-Trace-Id":    "trace-456",
-		"Cache-Control":  "no-store",
+		"Cache-Control": "no-store",
 	}
 	for key, want := range tests {
 		if got := rec.Header().Get(key); got != want {
@@ -1146,7 +1251,10 @@ func TestServer_ReplayHeaders_NotSetByDefault(t *testing.T) {
 		"X-Original": {"value"},
 	})
 
-	srv := NewServer(store) // no WithReplayHeaders
+	srv, err := NewServer(store) // no WithReplayHeaders
+	if err != nil {
+		t.Fatal(err)
+	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/default", nil)
 
@@ -1164,7 +1272,10 @@ func TestServer_Templating_BodySubstitution(t *testing.T) {
 	storeTape(t, store, "POST", "/echo", 200,
 		`{"method":"{{request.method}}","path":"{{request.path}}"}`, nil)
 
-	srv := NewServer(store)
+	srv, err := NewServer(store)
+	if err != nil {
+		t.Fatal(err)
+	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/echo", nil)
 
@@ -1185,7 +1296,10 @@ func TestServer_Templating_HeaderSubstitution(t *testing.T) {
 		"X-Idempotency-Key": {"{{request.headers.Idempotency-Key}}"},
 	})
 
-	srv := NewServer(store)
+	srv, err := NewServer(store)
+	if err != nil {
+		t.Fatal(err)
+	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/payments", nil)
 	req.Header.Set("Idempotency-Key", "idem-xyz-456")
@@ -1204,7 +1318,10 @@ func TestServer_Templating_Disabled(t *testing.T) {
 	store := NewMemoryStore()
 	storeTape(t, store, "GET", "/raw", 200, `{{request.method}}`, nil)
 
-	srv := NewServer(store, WithTemplating(false))
+	srv, err := NewServer(store, WithTemplating(false))
+	if err != nil {
+		t.Fatal(err)
+	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/raw", nil)
 
@@ -1223,7 +1340,10 @@ func TestServer_Templating_StrictMode_Error(t *testing.T) {
 	store := NewMemoryStore()
 	storeTape(t, store, "GET", "/strict", 200, `{{request.headers.Missing}}`, nil)
 
-	srv := NewServer(store, WithStrictTemplating(true))
+	srv, err := NewServer(store, WithStrictTemplating(true))
+	if err != nil {
+		t.Fatal(err)
+	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/strict", nil)
 
@@ -1246,7 +1366,10 @@ func TestServer_Templating_StrictMode_HeaderError(t *testing.T) {
 		"X-Echo": {"{{request.headers.Missing}}"},
 	})
 
-	srv := NewServer(store, WithStrictTemplating(true))
+	srv, err := NewServer(store, WithStrictTemplating(true))
+	if err != nil {
+		t.Fatal(err)
+	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/strict-hdr", nil)
 
@@ -1265,7 +1388,10 @@ func TestServer_Templating_LenientMode_MissingRef(t *testing.T) {
 	storeTape(t, store, "GET", "/lenient", 200,
 		`key={{request.headers.Missing}}`, nil)
 
-	srv := NewServer(store) // default: lenient
+	srv, err := NewServer(store) // default: lenient
+	if err != nil {
+		t.Fatal(err)
+	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/lenient", nil)
 
@@ -1283,7 +1409,10 @@ func TestServer_Templating_NoTemplates_FastPath(t *testing.T) {
 	store := NewMemoryStore()
 	storeTape(t, store, "GET", "/plain", 200, `{"static":"response"}`, nil)
 
-	srv := NewServer(store)
+	srv, err := NewServer(store)
+	if err != nil {
+		t.Fatal(err)
+	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/plain", nil)
 
@@ -1302,7 +1431,10 @@ func TestServer_Templating_QueryParam(t *testing.T) {
 	storeTape(t, store, "GET", "/search", 200,
 		`{"q":"{{request.query.q}}","page":"{{request.query.page}}"}`, nil)
 
-	srv := NewServer(store)
+	srv, err := NewServer(store)
+	if err != nil {
+		t.Fatal(err)
+	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/search?q=hello&page=3", nil)
 
@@ -1322,7 +1454,10 @@ func TestServer_Templating_BodyField(t *testing.T) {
 	storeTape(t, store, "POST", "/echo-body", 200,
 		`{"echo_email":"{{request.body.user.email}}"}`, nil)
 
-	srv := NewServer(store)
+	srv, err := NewServer(store)
+	if err != nil {
+		t.Fatal(err)
+	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/echo-body",
 		strings.NewReader(`{"user":{"email":"test@example.com"}}`))
@@ -1343,7 +1478,10 @@ func TestServer_Templating_LeavesStoredFixtureUnchanged(t *testing.T) {
 	tape := storeTape(t, store, "GET", "/immutable", 200,
 		`{{request.method}}`, nil)
 
-	srv := NewServer(store)
+	srv, err := NewServer(store)
+	if err != nil {
+		t.Fatal(err)
+	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/immutable", nil)
 
@@ -1369,7 +1507,10 @@ func TestServer_Templating_WithCORS(t *testing.T) {
 	storeTape(t, store, "GET", "/cors-template", 200,
 		`{{request.method}}`, nil)
 
-	srv := NewServer(store, WithCORS())
+	srv, err := NewServer(store, WithCORS())
+	if err != nil {
+		t.Fatal(err)
+	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/cors-template", nil)
 
@@ -1391,7 +1532,10 @@ func TestServer_Templating_EnabledByDefault(t *testing.T) {
 	storeTape(t, store, "GET", "/default-on", 200, `{{request.method}}`, nil)
 
 	// NewServer without any templating options — should be enabled by default.
-	srv := NewServer(store)
+	srv, err := NewServer(store)
+	if err != nil {
+		t.Fatal(err)
+	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/default-on", nil)
 
@@ -1410,7 +1554,10 @@ func TestServer_Templating_NonRequestNamespace_Literal(t *testing.T) {
 	storeTape(t, store, "GET", "/state", 200,
 		`count={{state.counter}}`, nil)
 
-	srv := NewServer(store)
+	srv, err := NewServer(store)
+	if err != nil {
+		t.Fatal(err)
+	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/state", nil)
 
@@ -1430,7 +1577,10 @@ func TestServer_Templating_URL(t *testing.T) {
 	storeTape(t, store, "GET", "/url-echo", 200,
 		`url={{request.url}}`, nil)
 
-	srv := NewServer(store)
+	srv, err := NewServer(store)
+	if err != nil {
+		t.Fatal(err)
+	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/url-echo?key=val", nil)
 

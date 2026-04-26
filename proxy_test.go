@@ -48,9 +48,12 @@ func TestProxy_SuccessPath(t *testing.T) {
 	l1 := NewMemoryStore()
 	l2 := NewMemoryStore()
 
-	proxy := NewProxy(l1, l2,
+	proxy, err := NewProxy(l1, l2,
 		WithProxyTransport(successTransport(200, "hello")),
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	req, _ := http.NewRequest("GET", "http://example.com/api/users", nil)
 	resp, err := proxy.RoundTrip(req)
@@ -107,9 +110,12 @@ func TestProxy_FallbackToL1(t *testing.T) {
 	l1.Save(context.Background(), tape) //nolint:errcheck
 
 	transportErr := errors.New("connection refused")
-	proxy := NewProxy(l1, l2,
+	proxy, err := NewProxy(l1, l2,
 		WithProxyTransport(failingTransport(transportErr)),
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	req, _ := http.NewRequest("GET", "http://example.com/api/users", nil)
 	resp, err := proxy.RoundTrip(req)
@@ -148,9 +154,12 @@ func TestProxy_FallbackToL2(t *testing.T) {
 	l2.Save(context.Background(), tape) //nolint:errcheck
 
 	transportErr := errors.New("connection refused")
-	proxy := NewProxy(l1, l2,
+	proxy, err := NewProxy(l1, l2,
 		WithProxyTransport(failingTransport(transportErr)),
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	req, _ := http.NewRequest("GET", "http://example.com/api/users", nil)
 	resp, err := proxy.RoundTrip(req)
@@ -176,9 +185,12 @@ func TestProxy_NoCacheError(t *testing.T) {
 	l2 := NewMemoryStore() // empty
 
 	transportErr := errors.New("connection refused")
-	proxy := NewProxy(l1, l2,
+	proxy, err := NewProxy(l1, l2,
 		WithProxyTransport(failingTransport(transportErr)),
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	req, _ := http.NewRequest("GET", "http://example.com/api/users", nil)
 	resp, err := proxy.RoundTrip(req)
@@ -200,7 +212,7 @@ func TestProxy_SanitizationOnL2Only(t *testing.T) {
 	// Create a sanitizer that redacts a specific header.
 	sanitizer := NewPipeline(RedactHeaders("Authorization"))
 
-	proxy := NewProxy(l1, l2,
+	proxy, err := NewProxy(l1, l2,
 		WithProxyTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			return &http.Response{
 				StatusCode: 200,
@@ -210,6 +222,9 @@ func TestProxy_SanitizationOnL2Only(t *testing.T) {
 		})),
 		WithProxySanitizer(sanitizer),
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	req, _ := http.NewRequest("GET", "http://example.com/api/users", nil)
 	req.Header.Set("Authorization", "Bearer secret-token")
@@ -266,7 +281,7 @@ func TestProxy_FallbackOn5xx(t *testing.T) {
 		}, nil
 	})
 
-	proxy := NewProxy(l1, l2,
+	proxy, err := NewProxy(l1, l2,
 		WithProxyTransport(transport),
 		WithProxyFallbackOn(func(err error, resp *http.Response) bool {
 			if err != nil {
@@ -275,6 +290,9 @@ func TestProxy_FallbackOn5xx(t *testing.T) {
 			return resp != nil && resp.StatusCode >= 500
 		}),
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	req, _ := http.NewRequest("GET", "http://example.com/api/users", nil)
 	resp, err := proxy.RoundTrip(req)
@@ -330,9 +348,12 @@ func TestProxy_XHttptapeSourceHeader(t *testing.T) {
 				l2.Save(context.Background(), tape) //nolint:errcheck
 			}
 
-			proxy := NewProxy(l1, l2,
+			proxy, err := NewProxy(l1, l2,
 				WithProxyTransport(failingTransport(errors.New("down"))),
 			)
+			if err != nil {
+				t.Fatal(err)
+			}
 
 			req, _ := http.NewRequest("GET", "http://example.com/x", nil)
 			resp, err := proxy.RoundTrip(req)
@@ -353,7 +374,10 @@ func TestProxy_Close_NoOp(t *testing.T) {
 	// This test verifies it implements RoundTripper only, not io.Closer.
 	l1 := NewMemoryStore()
 	l2 := NewMemoryStore()
-	proxy := NewProxy(l1, l2, WithProxyTransport(successTransport(200, "ok")))
+	proxy, err := NewProxy(l1, l2, WithProxyTransport(successTransport(200, "ok")))
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Verify it implements http.RoundTripper.
 	var _ http.RoundTripper = proxy
@@ -388,7 +412,10 @@ func TestProxy_ConcurrentSafety(t *testing.T) {
 		}, nil
 	})
 
-	proxy := NewProxy(l1, l2, WithProxyTransport(transport))
+	proxy, err := NewProxy(l1, l2, WithProxyTransport(transport))
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	var wg sync.WaitGroup
 	for i := 0; i < 50; i++ {
@@ -425,10 +452,13 @@ func TestProxy_RequestBodyPreservedForMatching(t *testing.T) {
 	})
 	l1.Save(context.Background(), tape) //nolint:errcheck
 
-	proxy := NewProxy(l1, l2,
+	proxy, err := NewProxy(l1, l2,
 		WithProxyTransport(failingTransport(errors.New("down"))),
 		WithProxyMatcher(NewCompositeMatcher(MethodCriterion{}, PathCriterion{}, BodyHashCriterion{})),
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	req, _ := http.NewRequest("POST", "http://example.com/api/items", bytes.NewReader(postBody))
 	resp, err := proxy.RoundTrip(req)
@@ -472,7 +502,7 @@ func TestProxy_OnErrorCallback(t *testing.T) {
 	l1 := NewMemoryStore()
 	l2 := NewMemoryStore()
 
-	proxy := NewProxy(l1, l2,
+	proxy, err := NewProxy(l1, l2,
 		WithProxyTransport(successTransport(200, "ok")),
 		WithProxyOnError(func(err error) {
 			mu.Lock()
@@ -480,6 +510,9 @@ func TestProxy_OnErrorCallback(t *testing.T) {
 			mu.Unlock()
 		}),
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	req, _ := http.NewRequest("GET", "http://example.com/api", nil)
 	resp, err := proxy.RoundTrip(req)
@@ -509,7 +542,7 @@ func TestProxy_FallbackOn5xx_NoCacheMatch(t *testing.T) {
 		}, nil
 	})
 
-	proxy := NewProxy(l1, l2,
+	proxy, err := NewProxy(l1, l2,
 		WithProxyTransport(transport),
 		WithProxyFallbackOn(func(err error, resp *http.Response) bool {
 			if err != nil {
@@ -518,6 +551,9 @@ func TestProxy_FallbackOn5xx_NoCacheMatch(t *testing.T) {
 			return resp != nil && resp.StatusCode >= 500
 		}),
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	req, _ := http.NewRequest("GET", "http://example.com/api/users", nil)
 	resp, err := proxy.RoundTrip(req)
@@ -547,10 +583,13 @@ func TestProxy_WithProxyRoute(t *testing.T) {
 	l1 := NewMemoryStore()
 	l2 := NewMemoryStore()
 
-	proxy := NewProxy(l1, l2,
+	proxy, err := NewProxy(l1, l2,
 		WithProxyTransport(successTransport(200, "ok")),
 		WithProxyRoute("users-api"),
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	req, _ := http.NewRequest("GET", "http://example.com/api/users", nil)
 	resp, err := proxy.RoundTrip(req)
@@ -586,9 +625,12 @@ func TestProxy_HealthDisabledByDefault(t *testing.T) {
 
 	baseline := runtime.NumGoroutine()
 
-	proxy := NewProxy(l1, l2,
+	proxy, err := NewProxy(l1, l2,
 		WithProxyTransport(successTransport(200, "ok")),
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if h := proxy.HealthHandler(); h != nil {
 		t.Fatalf("HealthHandler() = %v, want nil with default options", h)
@@ -634,12 +676,15 @@ func TestProxy_HealthHeaderUnchanged(t *testing.T) {
 	})
 	l1.Save(context.Background(), tape) //nolint:errcheck
 
-	proxy := NewProxy(l1, l2,
+	proxy, err := NewProxy(l1, l2,
 		WithProxyTransport(failingTransport(errors.New("down"))),
 		WithProxyUpstreamURL("http://example.com"),
 		WithProxyHealthEndpoint(),
 		WithProxyProbeInterval(0), // no probe loop in this test
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer proxy.Close() //nolint:errcheck
 
 	req, _ := http.NewRequest("GET", "http://example.com/x", nil)
@@ -658,12 +703,15 @@ func TestProxy_HealthEndpointMounted(t *testing.T) {
 	l1 := NewMemoryStore()
 	l2 := NewMemoryStore()
 
-	proxy := NewProxy(l1, l2,
+	proxy, err := NewProxy(l1, l2,
 		WithProxyTransport(successTransport(200, "ok")),
 		WithProxyUpstreamURL("http://upstream.example"),
 		WithProxyHealthEndpoint(),
 		WithProxyProbeInterval(0),
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer proxy.Close() //nolint:errcheck
 
 	if proxy.HealthHandler() == nil {
@@ -695,12 +743,15 @@ func TestProxy_StartCloseIdempotent(t *testing.T) {
 	l1 := NewMemoryStore()
 	l2 := NewMemoryStore()
 
-	proxy := NewProxy(l1, l2,
+	proxy, err := NewProxy(l1, l2,
 		WithProxyTransport(successTransport(200, "ok")),
 		WithProxyUpstreamURL("http://up"),
 		WithProxyHealthEndpoint(),
 		WithProxyProbeInterval(20*time.Millisecond),
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	baseline := runtime.NumGoroutine()
 	proxy.Start()
@@ -733,7 +784,7 @@ func TestProxy_HealthOptionsApplied(t *testing.T) {
 	l2 := NewMemoryStore()
 
 	var captured atomic.Int32
-	proxy := NewProxy(l1, l2,
+	proxy, err := NewProxy(l1, l2,
 		WithProxyTransport(failingTransport(errors.New("boom"))),
 		WithProxyUpstreamURL("http://up"),
 		WithProxyHealthEndpoint(),
@@ -741,6 +792,9 @@ func TestProxy_HealthOptionsApplied(t *testing.T) {
 		WithProxyProbePath("/healthz"),
 		WithProxyHealthErrorHandler(func(error) { captured.Add(1) }),
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer proxy.Close() //nolint:errcheck
 
 	if proxy.health == nil || proxy.health.probePath != "/healthz" {
@@ -767,13 +821,16 @@ func TestProxy_HealthErrorHandlerFallsBackToOnError(t *testing.T) {
 	l2 := NewMemoryStore()
 
 	var captured atomic.Int32
-	proxy := NewProxy(l1, l2,
+	proxy, err := NewProxy(l1, l2,
 		WithProxyTransport(failingTransport(errors.New("boom"))),
 		WithProxyUpstreamURL("http://up"),
 		WithProxyOnError(func(error) { captured.Add(1) }),
 		WithProxyHealthEndpoint(),
 		WithProxyProbeInterval(15*time.Millisecond),
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer proxy.Close() //nolint:errcheck
 
 	proxy.Start()
@@ -788,17 +845,19 @@ func TestProxy_HealthErrorHandlerFallsBackToOnError(t *testing.T) {
 	}
 }
 
-// TestProxy_HealthPanicsWithoutUpstreamURL confirms the constructor guard
-// fires when WithProxyHealthEndpoint is set without WithProxyUpstreamURL.
-func TestProxy_HealthPanicsWithoutUpstreamURL(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Error("expected panic when health endpoint enabled without upstream URL")
-		}
-	}()
-	NewProxy(NewMemoryStore(), NewMemoryStore(),
+// TestNewProxy_HealthEndpointRequiresUpstreamURL confirms the constructor
+// returns an error when WithProxyHealthEndpoint is set without
+// WithProxyUpstreamURL.
+func TestNewProxy_HealthEndpointRequiresUpstreamURL(t *testing.T) {
+	_, err := NewProxy(NewMemoryStore(), NewMemoryStore(),
 		WithProxyHealthEndpoint(),
 	)
+	if err == nil {
+		t.Fatal("expected error when health endpoint enabled without upstream URL, got nil")
+	}
+	if !strings.Contains(err.Error(), "WithProxyUpstreamURL") {
+		t.Errorf("error = %q, want it to mention WithProxyUpstreamURL", err.Error())
+	}
 }
 
 // TestProxy_HealthIntegration exercises the full path: a transport whose
@@ -834,12 +893,15 @@ func TestProxy_HealthIntegration(t *testing.T) {
 		}, nil
 	})
 
-	proxy := NewProxy(l1, l2,
+	proxy, err := NewProxy(l1, l2,
 		WithProxyTransport(transport),
 		WithProxyUpstreamURL("http://upstream.example"),
 		WithProxyHealthEndpoint(),
 		WithProxyProbeInterval(20*time.Millisecond),
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer proxy.Close() //nolint:errcheck
 
 	srv := httptest.NewServer(proxy.HealthHandler())
@@ -913,7 +975,10 @@ func TestProxy_SingleFlightViaComposition(t *testing.T) {
 		}, nil
 	})
 
-	proxy := NewProxy(l1, l2, WithProxyTransport(transport))
+	proxy, err := NewProxy(l1, l2, WithProxyTransport(transport))
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	const concurrency = 10
 	var wg sync.WaitGroup
@@ -957,7 +1022,7 @@ func TestProxy_CompositionSanitizationPath(t *testing.T) {
 
 	sanitizer := NewPipeline(RedactHeaders("X-Secret"))
 
-	proxy := NewProxy(l1, l2,
+	proxy, err := NewProxy(l1, l2,
 		WithProxyTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			return &http.Response{
 				StatusCode: 200,
@@ -967,6 +1032,9 @@ func TestProxy_CompositionSanitizationPath(t *testing.T) {
 		})),
 		WithProxySanitizer(sanitizer),
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	req, _ := http.NewRequest("GET", "http://example.com/api", nil)
 	req.Header.Set("X-Secret", "top-secret-value")
@@ -1195,10 +1263,13 @@ func TestWithProxySanitizer_NilDefaultsToNoopPipeline(t *testing.T) {
 	l1 := NewMemoryStore()
 	l2 := NewMemoryStore()
 
-	proxy := NewProxy(l1, l2,
+	proxy, err := NewProxy(l1, l2,
 		WithProxyTransport(successTransport(200, "ok")),
 		WithProxySanitizer(nil),
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	req, _ := http.NewRequest("GET", "http://example.com/api", nil)
 	req.Header.Set("Authorization", "Bearer secret")
@@ -1237,10 +1308,13 @@ func TestWithProxyTLSConfig_NonHTTPTransport(t *testing.T) {
 
 	// When transport is a custom RoundTripper (not *http.Transport),
 	// WithProxyTLSConfig should replace it with a new *http.Transport.
-	proxy := NewProxy(l1, l2,
+	proxy, err := NewProxy(l1, l2,
 		WithProxyTransport(customRT),
 		WithProxyTLSConfig(&tls.Config{InsecureSkipVerify: true}), //nolint:gosec
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// The transport should now be an *http.Transport with the TLS config.
 	if _, ok := proxy.transport.(*http.Transport); !ok {
@@ -1256,12 +1330,15 @@ func TestWithProxyProbeInterval_NegativeClamped(t *testing.T) {
 	l1 := NewMemoryStore()
 	l2 := NewMemoryStore()
 
-	proxy := NewProxy(l1, l2,
+	proxy, err := NewProxy(l1, l2,
 		WithProxyTransport(successTransport(200, "ok")),
 		WithProxyUpstreamURL("http://up"),
 		WithProxyHealthEndpoint(),
 		WithProxyProbeInterval(-5*time.Second),
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer proxy.Close() //nolint:errcheck
 
 	// The negative probe interval should be clamped to 0 (which means
@@ -1277,9 +1354,12 @@ func TestProxy_RequestBodyReadError(t *testing.T) {
 	l1 := NewMemoryStore()
 	l2 := NewMemoryStore()
 
-	proxy := NewProxy(l1, l2,
+	proxy, err := NewProxy(l1, l2,
 		WithProxyTransport(successTransport(200, "ok")),
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	req, _ := http.NewRequest("POST", "http://example.com/api", &errReadCloser{
 		remaining: 3,
@@ -1323,7 +1403,7 @@ func TestProxy_FallbackDrainReadError(t *testing.T) {
 		}, nil
 	})
 
-	proxy := NewProxy(l1, l2,
+	proxy, err := NewProxy(l1, l2,
 		WithProxyTransport(transport),
 		WithProxyFallbackOn(func(err error, resp *http.Response) bool {
 			if err != nil {
@@ -1332,6 +1412,9 @@ func TestProxy_FallbackDrainReadError(t *testing.T) {
 			return resp != nil && resp.StatusCode >= 500
 		}),
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	req, _ := http.NewRequest("GET", "http://example.com/api", nil)
 	resp, err := proxy.RoundTrip(req)
@@ -1359,10 +1442,13 @@ func TestProxy_MatchFromStoreListError(t *testing.T) {
 	l2 := NewMemoryStore()
 
 	var capturedErr error
-	proxy := NewProxy(l1, l2,
+	proxy, err := NewProxy(l1, l2,
 		WithProxyTransport(failingTransport(errors.New("down"))),
 		WithProxyOnError(func(err error) { capturedErr = err }),
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	req, _ := http.NewRequest("GET", "http://example.com/api", nil)
 	resp, err := proxy.RoundTrip(req)
@@ -1406,9 +1492,12 @@ func TestProxy_TapeToResponse_NilHeaders(t *testing.T) {
 	})
 	l1.Save(context.Background(), tape) //nolint:errcheck
 
-	proxy := NewProxy(l1, l2,
+	proxy, err := NewProxy(l1, l2,
 		WithProxyTransport(failingTransport(errors.New("down"))),
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	req, _ := http.NewRequest("GET", "http://example.com/api", nil)
 	resp, err := proxy.RoundTrip(req)
@@ -1448,9 +1537,12 @@ func TestProxy_TapeToResponse_NilBody(t *testing.T) {
 	})
 	l1.Save(context.Background(), tape) //nolint:errcheck
 
-	proxy := NewProxy(l1, l2,
+	proxy, err := NewProxy(l1, l2,
 		WithProxyTransport(failingTransport(errors.New("down"))),
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	req, _ := http.NewRequest("GET", "http://example.com/api", nil)
 	resp, err := proxy.RoundTrip(req)
@@ -1489,10 +1581,13 @@ func TestProxy_SSEResponseFromTape_WriteErrorClosesPipe(t *testing.T) {
 	})
 	l1.Save(context.Background(), tape) //nolint:errcheck
 
-	proxy := NewProxy(l1, l2,
+	proxy, err := NewProxy(l1, l2,
 		WithProxyTransport(failingTransport(errors.New("down"))),
 		WithProxySSETiming(SSETimingInstant()),
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	req, _ := http.NewRequest("GET", "http://example.com/stream", nil)
 	resp, err := proxy.RoundTrip(req)
@@ -1534,10 +1629,13 @@ func TestProxy_Fallback_BodyRestoredForL2Match(t *testing.T) {
 	})
 	l2.Save(context.Background(), tape) //nolint:errcheck
 
-	proxy := NewProxy(l1, l2,
+	proxy, err := NewProxy(l1, l2,
 		WithProxyTransport(failingTransport(errors.New("down"))),
 		WithProxyMatcher(NewCompositeMatcher(MethodCriterion{}, PathCriterion{})),
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	req, _ := http.NewRequest("POST", "http://example.com/api", bytes.NewReader(postBody))
 	resp, err := proxy.RoundTrip(req)
@@ -1708,10 +1806,13 @@ func TestProxy_SSEResponseFromTape_WithTiming(t *testing.T) {
 	})
 	l1.Save(context.Background(), tape) //nolint:errcheck
 
-	proxy := NewProxy(l1, l2,
+	proxy, err := NewProxy(l1, l2,
 		WithProxyTransport(failingTransport(errors.New("down"))),
 		WithProxySSETiming(SSETimingRealtime()),
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	req, _ := http.NewRequest("GET", "http://example.com/stream", nil)
 	start := time.Now()

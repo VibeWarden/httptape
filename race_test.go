@@ -240,7 +240,10 @@ func TestServer_ConcurrentServeHTTP(t *testing.T) {
 		}
 	}
 
-	srv := NewServer(store)
+	srv, err := NewServer(store)
+	if err != nil {
+		t.Fatal(err)
+	}
 	ts := httptest.NewServer(srv)
 	defer ts.Close()
 
@@ -342,7 +345,10 @@ func TestServer_ConcurrentSSEReplay(t *testing.T) {
 		}
 	}
 
-	srv := NewServer(store, WithSSETiming(SSETimingInstant()))
+	srv, err := NewServer(store, WithSSETiming(SSETimingInstant()))
+	if err != nil {
+		t.Fatal(err)
+	}
 	ts := httptest.NewServer(srv)
 	defer ts.Close()
 

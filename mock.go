@@ -155,7 +155,13 @@ func Mock(stubs ...Stub) *MockServer {
 		}
 	}
 
-	handler := NewServer(store)
+	// Mock always constructs a Server with no options, so NewServer cannot
+	// return an error. Panic on failure follows the existing Mock convention
+	// (Mock already panics on Save failure above).
+	handler, err := NewServer(store)
+	if err != nil {
+		panic("httptape: Mock failed to create server: " + err.Error())
+	}
 	ts := httptest.NewServer(handler)
 	return &MockServer{Server: ts}
 }

@@ -36,12 +36,12 @@ func generateTestCA(t *testing.T) testCert {
 	}
 
 	template := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "Test CA"},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(24 * time.Hour),
-		IsCA:         true,
-		KeyUsage:     x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "Test CA"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
 		BasicConstraintsValid: true,
 	}
 
@@ -328,7 +328,10 @@ func TestProxyTLSIntegration(t *testing.T) {
 
 	l1 := NewMemoryStore()
 	l2 := NewMemoryStore()
-	proxy := NewProxy(l1, l2, WithProxyTLSConfig(tlsCfg))
+	proxy, err := NewProxy(l1, l2, WithProxyTLSConfig(tlsCfg))
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	client := &http.Client{Transport: proxy}
 	resp, err := client.Get(ts.URL)
@@ -393,7 +396,10 @@ func TestWithProxyTLSConfig_NilConfig(t *testing.T) {
 	l2 := NewMemoryStore()
 
 	// Should not panic or change transport.
-	proxy := NewProxy(l1, l2, WithProxyTLSConfig(nil))
+	proxy, err := NewProxy(l1, l2, WithProxyTLSConfig(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if proxy.transport != http.DefaultTransport {
 		t.Fatal("expected default transport when TLS config is nil")
 	}
@@ -418,10 +424,13 @@ func TestWithProxyTLSConfig_CustomTransport(t *testing.T) {
 
 	l1 := NewMemoryStore()
 	l2 := NewMemoryStore()
-	proxy := NewProxy(l1, l2,
+	proxy, err := NewProxy(l1, l2,
 		WithProxyTransport(existing),
 		WithProxyTLSConfig(tlsCfg),
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	transport, ok := proxy.transport.(*http.Transport)
 	if !ok {
@@ -445,7 +454,10 @@ func TestWithProxyTLSConfig_DoesNotMutateDefaultTransport(t *testing.T) {
 	tlsCfg := &tls.Config{InsecureSkipVerify: true}
 	l1 := NewMemoryStore()
 	l2 := NewMemoryStore()
-	proxy := NewProxy(l1, l2, WithProxyTLSConfig(tlsCfg))
+	proxy, err := NewProxy(l1, l2, WithProxyTLSConfig(tlsCfg))
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// The proxy must have a new transport, not the default one.
 	if proxy.transport == http.DefaultTransport {

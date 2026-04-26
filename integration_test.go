@@ -188,7 +188,10 @@ func TestIntegration_RecordReplay_MemoryStore(t *testing.T) {
 	rec.Close()
 
 	// Create a replay Server from the same store.
-	srv := NewServer(store)
+	srv, err := NewServer(store)
+	if err != nil {
+		t.Fatal(err)
+	}
 	replayTS := httptest.NewServer(srv)
 	defer replayTS.Close()
 
@@ -227,7 +230,10 @@ func TestIntegration_RecordReplay_FileStore(t *testing.T) {
 	}
 
 	// Create a replay Server from the new store.
-	srv := NewServer(store2)
+	srv, err := NewServer(store2)
+	if err != nil {
+		t.Fatal(err)
+	}
 	replayTS := httptest.NewServer(srv)
 	defer replayTS.Close()
 
@@ -250,7 +256,10 @@ func TestIntegration_RecordReplay_AsyncRecorder(t *testing.T) {
 	// Close flushes the async buffer.
 	rec.Close()
 
-	srv := NewServer(store)
+	srv, err := NewServer(store)
+	if err != nil {
+		t.Fatal(err)
+	}
 	replayTS := httptest.NewServer(srv)
 	defer replayTS.Close()
 
@@ -290,7 +299,10 @@ func TestIntegration_RecordReplay_WithSanitization(t *testing.T) {
 	rec.Close()
 
 	// Replay from the store -- the replayed response should be sanitized.
-	srv := NewServer(store)
+	srv, err := NewServer(store)
+	if err != nil {
+		t.Fatal(err)
+	}
 	replayTS := httptest.NewServer(srv)
 	defer replayTS.Close()
 
@@ -387,7 +399,10 @@ func TestIntegration_RecordReplay_WithFakeFields(t *testing.T) {
 
 	// Replay via a real HTTP client — the Content-Length fix in ServeHTTP
 	// ensures the faked body (different length) is served correctly.
-	srv := NewServer(store)
+	srv, err := NewServer(store)
+	if err != nil {
+		t.Fatal(err)
+	}
 	replayTS := httptest.NewServer(srv)
 	defer replayTS.Close()
 
@@ -479,11 +494,17 @@ func TestIntegration_BothStores_IdenticalReplay(t *testing.T) {
 	}
 
 	// --- Replay from both stores ---
-	memSrv := NewServer(memStore)
+	memSrv, err := NewServer(memStore)
+	if err != nil {
+		t.Fatal(err)
+	}
 	memReplayTS := httptest.NewServer(memSrv)
 	defer memReplayTS.Close()
 
-	fileSrv := NewServer(fileStore)
+	fileSrv, err := NewServer(fileStore)
+	if err != nil {
+		t.Fatal(err)
+	}
 	fileReplayTS := httptest.NewServer(fileSrv)
 	defer fileReplayTS.Close()
 
@@ -573,7 +594,10 @@ func TestIntegration_RecordReplay_FileStore_Sanitized(t *testing.T) {
 		t.Fatalf("NewFileStore (reload): %v", err)
 	}
 
-	srv := NewServer(store2)
+	srv, err := NewServer(store2)
+	if err != nil {
+		t.Fatal(err)
+	}
 	replayTS := httptest.NewServer(srv)
 	defer replayTS.Close()
 
@@ -628,7 +652,10 @@ func TestIntegration_RecordReplay_PostWithBody(t *testing.T) {
 	}
 
 	// Replay.
-	srv := NewServer(store)
+	srv, err := NewServer(store)
+	if err != nil {
+		t.Fatal(err)
+	}
 	replayTS := httptest.NewServer(srv)
 	defer replayTS.Close()
 
@@ -693,7 +720,10 @@ func TestIntegration_SSE_RecordReplay_E2E(t *testing.T) {
 	}
 
 	// Replay.
-	srv := NewServer(store, WithSSETiming(SSETimingInstant()))
+	srv, err := NewServer(store, WithSSETiming(SSETimingInstant()))
+	if err != nil {
+		t.Fatal(err)
+	}
 	replayTS := httptest.NewServer(srv)
 	defer replayTS.Close()
 
@@ -747,7 +777,10 @@ func TestIntegration_SSE_Proxy_E2E(t *testing.T) {
 	l1 := NewMemoryStore()
 	l2 := NewMemoryStore()
 
-	proxy := NewProxy(l1, l2, WithProxyTransport(upstream.Client().Transport))
+	proxy, err := NewProxy(l1, l2, WithProxyTransport(upstream.Client().Transport))
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Passthrough: forward to upstream.
 	req, _ := http.NewRequest("GET", upstream.URL+"/sse", nil)
@@ -778,12 +811,15 @@ func TestIntegration_SSE_Proxy_E2E(t *testing.T) {
 	}
 
 	// L2 fallback: upstream is now "down".
-	proxy2 := NewProxy(l1, l2,
+	proxy2, err := NewProxy(l1, l2,
 		WithProxyTransport(roundTripperFunc(func(_ *http.Request) (*http.Response, error) {
 			return nil, errors.New("down")
 		})),
 		WithProxySSETiming(SSETimingInstant()),
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	req2, _ := http.NewRequest("GET", upstream.URL+"/sse", nil)
 	resp2, err := proxy2.RoundTrip(req2)
@@ -861,7 +897,10 @@ func TestIntegration_ConfigDrivenMatcher_BodyFuzzy(t *testing.T) {
 	}
 
 	// Start server with the config-driven matcher.
-	srv := NewServer(store, WithMatcher(matcher))
+	srv, err := NewServer(store, WithMatcher(matcher))
+	if err != nil {
+		t.Fatal(err)
+	}
 	ts := httptest.NewServer(srv)
 	defer ts.Close()
 
@@ -959,7 +998,10 @@ func TestIntegration_ContentNegotiation_MultiCT(t *testing.T) {
 		t.Fatalf("BuildMatcher: %v", err)
 	}
 
-	srv := NewServer(store, WithMatcher(matcher))
+	srv, err := NewServer(store, WithMatcher(matcher))
+	if err != nil {
+		t.Fatal(err)
+	}
 	ts := httptest.NewServer(srv)
 	defer ts.Close()
 

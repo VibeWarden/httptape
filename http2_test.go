@@ -102,7 +102,11 @@ func TestHTTP2Replay(t *testing.T) {
 		t.Fatalf("save tape: %v", err)
 	}
 
-	srv := httptest.NewUnstartedServer(NewServer(store))
+	handler, err := NewServer(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewUnstartedServer(handler)
 	srv.EnableHTTP2 = true
 	srv.StartTLS()
 	defer srv.Close()

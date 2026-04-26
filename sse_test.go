@@ -436,7 +436,10 @@ func TestSSETimingAccelerated(t *testing.T) {
 		{OffsetMS: 200},
 		{OffsetMS: 600},
 	}
-	mode := SSETimingAccelerated(2.0)
+	mode, err := SSETimingAccelerated(2.0)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if d := mode.delay(events, 0); d != 0 {
 		t.Errorf("delay(0) = %v, want 0", d)
@@ -449,22 +452,24 @@ func TestSSETimingAccelerated(t *testing.T) {
 	}
 }
 
-func TestSSETimingAccelerated_PanicOnZero(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Error("expected panic for factor 0")
-		}
-	}()
-	SSETimingAccelerated(0)
+func TestSSETimingAccelerated_ErrorOnZero(t *testing.T) {
+	_, err := SSETimingAccelerated(0)
+	if err == nil {
+		t.Error("expected error for factor 0, got nil")
+	}
+	if !strings.Contains(err.Error(), "must be > 0") {
+		t.Errorf("error = %q, want it to contain 'must be > 0'", err.Error())
+	}
 }
 
-func TestSSETimingAccelerated_PanicOnNegative(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Error("expected panic for negative factor")
-		}
-	}()
-	SSETimingAccelerated(-1.0)
+func TestSSETimingAccelerated_ErrorOnNegative(t *testing.T) {
+	_, err := SSETimingAccelerated(-1.0)
+	if err == nil {
+		t.Error("expected error for negative factor, got nil")
+	}
+	if !strings.Contains(err.Error(), "must be > 0") {
+		t.Errorf("error = %q, want it to contain 'must be > 0'", err.Error())
+	}
 }
 
 func TestSSETimingInstant(t *testing.T) {
@@ -737,8 +742,12 @@ func TestReplaySSEEvents_Accelerated(t *testing.T) {
 	rec := httptest.NewRecorder()
 	flusher := http.ResponseWriter(rec).(http.Flusher)
 
+	accelMode, modeErr := SSETimingAccelerated(2.0)
+	if modeErr != nil {
+		t.Fatal(modeErr)
+	}
 	start := time.Now()
-	err := replaySSEEvents(context.Background(), rec, flusher, events, SSETimingAccelerated(2.0))
+	err := replaySSEEvents(context.Background(), rec, flusher, events, accelMode)
 	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatalf("error: %v", err)
@@ -955,7 +964,10 @@ func TestServer_SSEReplay_Instant(t *testing.T) {
 	})
 	store.Save(context.Background(), tape)
 
-	srv := NewServer(store, WithSSETiming(SSETimingInstant()))
+	srv, err := NewServer(store, WithSSETiming(SSETimingInstant()))
+	if err != nil {
+		t.Fatal(err)
+	}
 	ts := httptest.NewServer(srv)
 	defer ts.Close()
 
@@ -1010,10 +1022,13 @@ func TestServer_SSEReplay_WithHeaders(t *testing.T) {
 	})
 	store.Save(context.Background(), tape)
 
-	srv := NewServer(store,
+	srv, err := NewServer(store,
 		WithSSETiming(SSETimingInstant()),
 		WithReplayHeaders("X-Override", "injected"),
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	ts := httptest.NewServer(srv)
 	defer ts.Close()
 
@@ -1056,7 +1071,10 @@ func TestServer_NonSSETapeUnchanged(t *testing.T) {
 	})
 	store.Save(context.Background(), tape)
 
-	srv := NewServer(store, WithSSETiming(SSETimingInstant()))
+	srv, err := NewServer(store, WithSSETiming(SSETimingInstant()))
+	if err != nil {
+		t.Fatal(err)
+	}
 	ts := httptest.NewServer(srv)
 	defer ts.Close()
 
@@ -1099,7 +1117,10 @@ func TestProxy_SSE_SuccessPath(t *testing.T) {
 
 	l1 := NewMemoryStore()
 	l2 := NewMemoryStore()
-	proxy := NewProxy(l1, l2, WithProxyTransport(upstream.Client().Transport))
+	proxy, err := NewProxy(l1, l2, WithProxyTransport(upstream.Client().Transport))
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	req, _ := http.NewRequest("GET", upstream.URL+"/stream", nil)
 	resp, err := proxy.RoundTrip(req)
@@ -1161,10 +1182,13 @@ func TestProxy_SSE_L2Fallback(t *testing.T) {
 	})
 	l2.Save(context.Background(), tape)
 
-	proxy := NewProxy(l1, l2,
+	proxy, err := NewProxy(l1, l2,
 		WithProxyTransport(failingTransport(errors.New("down"))),
 		WithProxySSETiming(SSETimingInstant()),
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	req, _ := http.NewRequest("GET", "http://example.com/stream", nil)
 	resp, err := proxy.RoundTrip(req)
@@ -1347,7 +1371,10 @@ func TestIntegration_SSE_RecordReplay(t *testing.T) {
 	}
 
 	// Replay.
-	srv := NewServer(store, WithSSETiming(SSETimingInstant()))
+	srv, err := NewServer(store, WithSSETiming(SSETimingInstant()))
+	if err != nil {
+		t.Fatal(err)
+	}
 	ts := httptest.NewServer(srv)
 	defer ts.Close()
 
@@ -1430,7 +1457,10 @@ func TestIntegration_SSE_RecordReplay_WithSanitization(t *testing.T) {
 	}
 
 	// Replay and verify redacted values are served.
-	srv := NewServer(store, WithSSETiming(SSETimingInstant()))
+	srv, err := NewServer(store, WithSSETiming(SSETimingInstant()))
+	if err != nil {
+		t.Fatal(err)
+	}
 	ts := httptest.NewServer(srv)
 	defer ts.Close()
 
@@ -1471,7 +1501,10 @@ func TestIntegration_SSE_ProxyPassthrough(t *testing.T) {
 
 	l1 := NewMemoryStore()
 	l2 := NewMemoryStore()
-	proxy := NewProxy(l1, l2, WithProxyTransport(upstream.Client().Transport))
+	proxy, err := NewProxy(l1, l2, WithProxyTransport(upstream.Client().Transport))
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Use the proxy as an HTTP handler via httptest.
 	proxyHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1540,12 +1573,15 @@ func TestHealth_StreamUsesWriteSSEEvent(t *testing.T) {
 	l1 := NewMemoryStore()
 	l2 := NewMemoryStore()
 
-	proxy := NewProxy(l1, l2,
+	proxy, err := NewProxy(l1, l2,
 		WithProxyTransport(successTransport(200, "ok")),
 		WithProxyUpstreamURL("http://upstream.example"),
 		WithProxyHealthEndpoint(),
 		WithProxyProbeInterval(0),
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer proxy.Close()
 
 	srv := httptest.NewServer(proxy.HealthHandler())
@@ -1685,7 +1721,10 @@ func TestSSETimingAccelerated_NegativeGapClamped(t *testing.T) {
 		{OffsetMS: 200},
 		{OffsetMS: 100},
 	}
-	mode := SSETimingAccelerated(2.0)
+	mode, err := SSETimingAccelerated(2.0)
+	if err != nil {
+		t.Fatal(err)
+	}
 	d := mode.delay(events, 1)
 	if d != 0 {
 		t.Errorf("negative gap should be clamped to 0, got %v", d)
@@ -1701,7 +1740,10 @@ func TestSSETimingAccelerated_FractionalFactor(t *testing.T) {
 		{OffsetMS: 0},
 		{OffsetMS: 100},
 	}
-	mode := SSETimingAccelerated(0.5)
+	mode, err := SSETimingAccelerated(0.5)
+	if err != nil {
+		t.Fatal(err)
+	}
 	d := mode.delay(events, 1)
 	expected := 200 * time.Millisecond
 	if math.Abs(float64(d-expected)) > float64(5*time.Millisecond) {
@@ -1759,9 +1801,13 @@ func TestSSETimingMode_SealMethodsAreCallable(t *testing.T) {
 	// The sseTimingMode() methods are seal methods that prevent external
 	// implementations. They are no-op but should be covered for completeness.
 	// We exercise them indirectly through the SSETimingMode interface.
+	accel, err := SSETimingAccelerated(1.0)
+	if err != nil {
+		t.Fatal(err)
+	}
 	modes := []SSETimingMode{
 		SSETimingRealtime(),
-		SSETimingAccelerated(1.0),
+		accel,
 		SSETimingInstant(),
 	}
 	for _, m := range modes {
