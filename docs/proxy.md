@@ -44,6 +44,8 @@ Forward to upstream
 - Lost when the process exits
 - Checked first during fallback (lowest latency, best data quality)
 
+**L1 must be an ephemeral, in-memory store.** Because L1 holds unsanitized data (raw secrets, PII), using a persistent store for L1 would bypass httptape's sanitize-on-write guarantee. Always use `NewMemoryStore()` for L1.
+
 ### L2: Disk cache (redacted)
 
 - Backed by a `FileStore`

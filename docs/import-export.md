@@ -132,6 +132,12 @@ The entire bundle is validated before any fixtures are persisted:
 
 If validation fails, the store is not modified.
 
+### Sanitization policy
+
+ImportBundle does not re-sanitize imported tapes. Bundles produced by ExportBundle contain already-sanitized data (sanitization happens at recording time, before tapes reach the store). Re-sanitization on import would corrupt deterministically faked values by double-faking them.
+
+If you import a bundle from an untrusted or hand-edited source, validate its contents externally before import. ImportBundle stores tapes exactly as they appear in the bundle.
+
 ### Size limits
 
 Individual tar entries are limited to 50 MB to prevent zip-bomb-style attacks.

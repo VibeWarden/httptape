@@ -21,6 +21,13 @@ import (
 // responses on the miss path, saving raw (unsanitized) tapes to L1
 // before CachingTransport sanitizes and saves to L2.
 //
+// L1 must be an ephemeral, in-memory store (typically *MemoryStore). Because
+// L1 holds unsanitized data, using a persistent store for L1 would bypass
+// the sanitize-on-write guarantee and persist raw secrets and PII to disk.
+// This constraint is documented rather than enforced at runtime: a type check
+// against *MemoryStore would not catch custom ephemeral Store implementations,
+// and would false-positive on wrappers embedding *MemoryStore.
+//
 // On success:
 //   - Raw (unsanitized) tape saved to L1 via l1RecordingTransport
 //   - Sanitized tape saved to L2 via CachingTransport
@@ -442,6 +449,9 @@ func WithProxyUpstreamURL(url string) ProxyOption {
 //   - matcher: DefaultMatcher()
 //   - isFallback: transport errors only (not 5xx)
 //   - route: ""
+//
+// L1 must be an ephemeral store (typically NewMemoryStore()) because it holds
+// unsanitized data. See the Proxy type documentation for details.
 //
 // Both l1 and l2 must be non-nil. Panics on nil stores (constructor guard
 // convention per CLAUDE.md).
