@@ -47,83 +47,21 @@ License: Apache 2.0
 
 ### Package structure
 
-```
-httptape/
-  bundle.go                    # Import/export (tar.gz archive of fixture files)
-  bundle_test.go
-  caching_transport.go         # CachingTransport RoundTripper (replay + record-on-miss)
-  caching_transport_test.go
-  config.go                    # Declarative JSON config for sanitization pipeline
-  config_test.go
-  config.schema.json           # JSON Schema for config file validation (IDE/CI use)
-  diff.go                      # DiffStatus type for comparing live responses against recorded fixtures
-  diff_test.go
-  doc.go                       # Package-level godoc documentation
-  faker.go                     # Faker interface and RedactedFaker for deterministic value replacement
-  faker_test.go
-  fixtures.go                  # LoadFixtures helper (validates + loads a directory of fixture JSON)
-  fixtures_test.go
-  health.go                    # HealthSnapshot type and HealthMonitor for proxy health tracking
-  health_test.go
-  http2_test.go                # HTTP/2 transport integration tests
-  integration_test.go          # End-to-end integration tests
-  matcher.go                   # Matcher interface, Criterion, CompositeMatcher, ExactMatcher
-  matcher_test.go
-  media_type.go                # MediaType parsing, classification (IsJSON/IsText/IsBinary), content negotiation
-  media_type_test.go
-  mock.go                      # MockServer and fluent When/Respond stub builder for test helpers
-  mock_test.go
-  proxy.go                     # Proxy RoundTripper (upstream forwarding, L1/L2 cache, stale fallback)
-  proxy_test.go
-  race_test.go                 # Dedicated concurrency/race-condition tests
-  recorder.go                  # RoundTripper wrapper for recording (includes RecorderOption)
-  recorder_test.go
-  sanitizer.go                 # Redaction and deterministic faking (includes SanitizeFunc, Pipeline)
-  sanitizer_test.go
-  server.go                    # Mock HTTP server (http.Handler, includes ServerOption)
-  server_test.go
-  sse.go                       # SSEEvent value type and SSE stream parsing/timing helpers
-  sse_test.go
-  store.go                     # Storage port (interface)
-  store_file.go                # Filesystem storage adapter (includes FileStoreOption)
-  store_file_test.go
-  store_memory.go              # In-memory storage adapter (for tests)
-  store_memory_test.go
-  tape.go                      # Core Tape type and related types (RecordedReq, RecordedResp)
-  tape_test.go
-  templating.go                # Mustache-style template expression scanner and helpers
-  templating_test.go
-  tls.go                       # BuildTLSConfig helper (mTLS, custom CA, insecure flag)
-  tls_test.go
-```
+Single flat Go package. Each file represents a logical concern (recorder, server, sanitizer, store, matcher, proxy, etc.). Tests live next to the code they test (`*_test.go`); package overview lives in `doc.go`. Functional options are co-located with their type (e.g., `RecorderOption` in `recorder.go`), not in a monolithic `options.go`. The `Matcher` interface lives in `matcher.go` alongside its implementations.
 
-**Maintenance note**: when adding a new `.go` file to the package root, add it to this list in the same PR. This file list is the source of truth that orients contributors and AI agents.
-
-Note: functional options are co-located with their respective types (e.g.,
-`RecorderOption` in `recorder.go`, `ServerOption` in `server.go`) rather than
-in a monolithic `options.go` file. The `Matcher` interface lives in `matcher.go`
-alongside its implementations.
+For the current file inventory, run `ls *.go` — this document describes principles, not file census.
 
 ### Layer rules
 
-- **Core types** (`tape.go`, `sse.go:SSEEvent`): zero imports outside stdlib.
-  Pure value types with no I/O.
-- **Ports** (`store.go`, top of `matcher.go`, `faker.go:Faker`): interfaces
-  only. No implementations in the same declaration block.
-- **Adapters** (`store_file.go`, `store_memory.go`): implement port interfaces.
-  May use stdlib I/O.
-- **Services** (`recorder.go`, `server.go`, `sanitizer.go`,
-  `caching_transport.go`, `proxy.go`, `mock.go`, `diff.go`, `health.go`):
-  orchestrate core types and ports. Accept ports via constructor injection.
-- **Helpers** (`tls.go`, `fixtures.go`, `templating.go`): pure or near-pure
-  utility functions. No interfaces, no constructor injection. Called by
-  services or directly by embedders.
+The library follows hexagonal architecture inside a single Go package. The categories below describe the role each file plays; examples are illustrative, not exhaustive.
 
-Since this is a single Go package (library), we don't have `internal/ports/` and `internal/adapters/` directories.
-Instead, the hexagonal boundaries are enforced by convention:
-- Interfaces are defined at the top of their respective files or in `store.go`
-- Implementations live in separate files (`store_file.go`, `store_memory.go`)
-- Core types have zero I/O — they are pure data structures
+- **Core types** (e.g., `tape.go`, `sse.go:SSEEvent`): pure value types. Zero non-stdlib imports, no I/O.
+- **Ports** (e.g., `store.go`, the `Matcher` interface in `matcher.go`, the `Faker` interface in `faker.go`): interface declarations only, no implementations in the same block.
+- **Adapters** (e.g., `store_file.go`, `store_memory.go`): implement port interfaces. May use stdlib I/O.
+- **Services** (e.g., `recorder.go`, `server.go`, `sanitizer.go`, `caching_transport.go`, `proxy.go`): orchestrate core types and ports. Accept ports via constructor injection.
+- **Helpers** (e.g., `tls.go`, `fixtures.go`, `templating.go`): pure or near-pure utility functions. No interfaces, no constructor injection.
+
+Because this is a single Go package, we don't use `internal/ports/` and `internal/adapters/` directories. Boundaries are enforced by convention: interfaces at the top of their file (or in `store.go`), implementations in separate files, core types with zero I/O.
 
 ---
 
