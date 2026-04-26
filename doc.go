@@ -28,7 +28,10 @@
 // [Server] implements [http.Handler] and replays recorded tapes. It uses a
 // [Matcher] to find the best-matching tape for each incoming request.
 //
-//	srv := httptape.NewServer(store)
+//	srv, err := httptape.NewServer(store)
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
 //	ts := httptest.NewServer(srv)
 //	defer ts.Close()
 //

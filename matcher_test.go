@@ -1779,7 +1779,10 @@ func TestServer_UsesDefaultMatcher(t *testing.T) {
 		t.Fatalf("saving tape: %v", err)
 	}
 
-	srv := NewServer(store)
+	srv, err := NewServer(store)
+	if err != nil {
+		t.Fatal(err)
+	}
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/users", nil)
 	srv.ServeHTTP(w, req)

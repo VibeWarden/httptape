@@ -1,6 +1,8 @@
 package httptape
 
 import (
+	"errors"
+	"fmt"
 	"math/rand"
 	"net/http"
 	"time"
@@ -85,13 +87,10 @@ func WithDelay(d time.Duration) ServerOption {
 // A rate of 0.0 disables error simulation (default). A rate of 1.0
 // causes all requests to fail.
 //
-// Panics if rate is outside [0.0, 1.0]. This is a programming error,
-// following the constructor-guard convention.
+// The rate is validated when NewServer is called. An out-of-range rate
+// causes NewServer to return an error.
 func WithErrorRate(rate float64) ServerOption {
 	return func(s *Server) {
-		if rate < 0 || rate > 1 {
-			panic("httptape: WithErrorRate rate must be between 0.0 and 1.0")
-		}
 		s.errorRate = rate
 	}
 }
@@ -180,7 +179,10 @@ func withRandFloat(fn func() float64) ServerOption {
 //
 // The store must not be nil. Passing a nil store is a programming error and
 // will panic.
-func NewServer(store Store, opts ...ServerOption) *Server {
+//
+// Returns an error if any option values are invalid (e.g., error rate outside
+// [0.0, 1.0]). All validation errors are accumulated and returned together.
+func NewServer(store Store, opts ...ServerOption) (*Server, error) {
 	if store == nil {
 		panic("httptape: NewServer requires a non-nil Store")
 	}
@@ -197,12 +199,21 @@ func NewServer(store Store, opts ...ServerOption) *Server {
 		opt(s)
 	}
 
+	// Validate after all options are applied.
+	var errs []error
+	if s.errorRate < 0 || s.errorRate > 1 {
+		errs = append(errs, fmt.Errorf("httptape: WithErrorRate rate must be between 0.0 and 1.0, got %g", s.errorRate))
+	}
+	if len(errs) > 0 {
+		return nil, errors.Join(errs...)
+	}
+
 	// Default random number generator for error simulation.
 	if s.randFloat == nil {
 		s.randFloat = rand.Float64
 	}
 
-	return s
+	return s, nil
 }
 
 // ServeHTTP handles an incoming HTTP request by finding a matching tape

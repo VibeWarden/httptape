@@ -4,6 +4,45 @@ All notable changes to httptape are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Breaking Changes
+
+- **`NewServer` signature change**: `NewServer(store Store, opts ...ServerOption)`
+  now returns `(*Server, error)` instead of `*Server`. The constructor validates
+  option values (e.g., error rate) after all options are applied and returns an
+  error if any are invalid. Nil-store panics are retained (programming error
+  convention). (#215, ADR-46)
+
+- **`NewProxy` signature change**: `NewProxy(l1, l2 Store, opts ...ProxyOption)`
+  now returns `(*Proxy, error)` instead of `*Proxy`. The constructor validates
+  cross-option constraints (e.g., `WithProxyHealthEndpoint` requires
+  `WithProxyUpstreamURL`) and returns an error instead of panicking. Nil-store
+  panics are retained. (#215, ADR-46)
+
+- **`SSETimingAccelerated` signature change**: `SSETimingAccelerated(factor float64)`
+  now returns `(SSETimingMode, error)` instead of `SSETimingMode`. Returns an
+  error when factor is <= 0 instead of panicking. (#215, ADR-46)
+
+### Migration
+
+All three changes are caught by the Go compiler -- no silent breakage. Update
+call sites as follows:
+
+```go
+// Before
+srv := httptape.NewServer(store, opts...)
+
+// After
+srv, err := httptape.NewServer(store, opts...)
+if err != nil {
+    // handle error
+}
+```
+
+The same pattern applies to `NewProxy` and `SSETimingAccelerated`. Behavior on
+success is unchanged.
+
 ## [0.13.1] - 2026-04-18
 
 ### Changed

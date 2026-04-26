@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -455,7 +456,11 @@ func WithProxyUpstreamURL(url string) ProxyOption {
 //
 // Both l1 and l2 must be non-nil. Panics on nil stores (constructor guard
 // convention per CLAUDE.md).
-func NewProxy(l1, l2 Store, opts ...ProxyOption) *Proxy {
+//
+// Returns an error if any cross-option constraints are violated (e.g.,
+// WithProxyHealthEndpoint without WithProxyUpstreamURL). All validation
+// errors are accumulated and returned together.
+func NewProxy(l1, l2 Store, opts ...ProxyOption) (*Proxy, error) {
 	if l1 == nil {
 		panic("httptape: NewProxy requires a non-nil L1 Store")
 	}
@@ -479,14 +484,16 @@ func NewProxy(l1, l2 Store, opts ...ProxyOption) *Proxy {
 		opt(p)
 	}
 
-	if p.healthEnabled {
-		// Default the upstream URL to "" when the embedder didn't provide one.
-		// HealthMonitor's constructor guard panics on empty upstream -- give a
-		// clearer message here pointing at the right option.
-		if p.upstreamURLHint == "" {
-			panic("httptape: WithProxyHealthEndpoint requires WithProxyUpstreamURL")
-		}
+	// Validate after all options are applied.
+	var errs []error
+	if p.healthEnabled && p.upstreamURLHint == "" {
+		errs = append(errs, fmt.Errorf("httptape: WithProxyHealthEndpoint requires WithProxyUpstreamURL"))
+	}
+	if len(errs) > 0 {
+		return nil, errors.Join(errs...)
+	}
 
+	if p.healthEnabled {
 		// Resolve the error handler precedence: explicit health handler beats
 		// the proxy-wide onError, which beats nothing.
 		var errFn func(error)
@@ -557,7 +564,7 @@ func NewProxy(l1, l2 Store, opts ...ProxyOption) *Proxy {
 		WithCacheFilter(cacheFilter),
 	)
 
-	return p
+	return p, nil
 }
 
 // HealthHandler returns the http.Handler that serves /__httptape/health and

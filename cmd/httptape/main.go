@@ -150,7 +150,13 @@ func parseSSETiming(s string) (httptape.SSETimingMode, error) {
 		if factor <= 0 {
 			return nil, fmt.Errorf("invalid --sse-timing %q: factor must be greater than 0. Valid modes: realtime, instant, accelerated=<factor>", s)
 		}
-		return httptape.SSETimingAccelerated(factor), nil
+		// The CLI pre-validates factor > 0 above, so SSETimingAccelerated
+		// cannot return an error here. Handle it defensively anyway.
+		mode, modeErr := httptape.SSETimingAccelerated(factor)
+		if modeErr != nil {
+			return nil, fmt.Errorf("invalid --sse-timing %q: %w", s, modeErr)
+		}
+		return mode, nil
 	default:
 		return nil, fmt.Errorf("invalid --sse-timing %q: valid modes are realtime, instant, accelerated=<factor>", s)
 	}
@@ -220,7 +226,10 @@ func runServe(args []string) error {
 		serverOpts = append(serverOpts, httptape.WithReplayHeaders(rh[:eqIdx], rh[eqIdx+1:]))
 	}
 
-	server := httptape.NewServer(store, serverOpts...)
+	server, err := httptape.NewServer(store, serverOpts...)
+	if err != nil {
+		return fmt.Errorf("create server: %w", err)
+	}
 
 	addr := fmt.Sprintf(":%d", *port)
 	httpServer := &http.Server{
@@ -481,7 +490,10 @@ func runProxy(args []string) error {
 		return &usageError{fmt.Errorf("--upstream-probe-interval requires --health-endpoint")}
 	}
 
-	tapeProxy := httptape.NewProxy(l1, l2, proxyOpts...)
+	tapeProxy, err := httptape.NewProxy(l1, l2, proxyOpts...)
+	if err != nil {
+		return fmt.Errorf("create proxy: %w", err)
+	}
 
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
@@ -765,10 +777,10 @@ func migrateLegacyFixture(data []byte) ([]byte, error) {
 }
 
 // removeLegacyBodyEncodingAndDecodeBody modifies the raw JSON to:
-// 1. Remove body_encoding fields
-// 2. For base64-encoded bodies with non-JSON Content-Types, decode the body
-//    and replace it with the appropriate representation so the new
-//    UnmarshalJSON interprets it correctly.
+//  1. Remove body_encoding fields
+//  2. For base64-encoded bodies with non-JSON Content-Types, decode the body
+//     and replace it with the appropriate representation so the new
+//     UnmarshalJSON interprets it correctly.
 func removeLegacyBodyEncodingAndDecodeBody(data []byte, reqEncoding, respEncoding string) []byte {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
