@@ -174,6 +174,7 @@ func runServe(args []string) error {
 	var replayHeaders repeatableFlag
 	fs.Var(&replayHeaders, "replay-header", "Header to inject into responses (Key=Value, repeatable)")
 	sseTiming := fs.String("sse-timing", "", "SSE replay timing mode: realtime, instant, accelerated=<factor>")
+	synthesize := fs.Bool("synthesize", false, "Enable synthesis mode (exemplar tapes generate responses for unmatched URLs)")
 
 	if err := fs.Parse(args); err != nil {
 		return &usageError{err}
@@ -224,6 +225,41 @@ func runServe(args []string) error {
 			return &usageError{fmt.Errorf("invalid --replay-header %q: expected Key=Value", rh)}
 		}
 		serverOpts = append(serverOpts, httptape.WithReplayHeaders(rh[:eqIdx], rh[eqIdx+1:]))
+	}
+	if *synthesize {
+		serverOpts = append(serverOpts, httptape.WithSynthesis())
+	}
+
+	// Startup validation: check all loaded tapes for structural validity.
+	allTapes, err := store.List(context.Background(), httptape.Filter{})
+	if err != nil {
+		return fmt.Errorf("load tapes: %w", err)
+	}
+	for _, t := range allTapes {
+		if err := httptape.ValidateTape(t); err != nil {
+			return fmt.Errorf("invalid tape %s: %w", t.ID, err)
+		}
+	}
+
+	// Synthesis logging.
+	if *synthesize {
+		exemplarCount := 0
+		for _, t := range allTapes {
+			if t.Exemplar {
+				exemplarCount++
+			}
+		}
+		logger.Printf("synthesis mode ENABLED -- %d exemplar tape(s) loaded", exemplarCount)
+	} else {
+		exemplarCount := 0
+		for _, t := range allTapes {
+			if t.Exemplar {
+				exemplarCount++
+			}
+		}
+		if exemplarCount > 0 {
+			logger.Printf("WARNING: %d exemplar tape(s) found but synthesis is disabled (use --synthesize to enable)", exemplarCount)
+		}
 	}
 
 	server, err := httptape.NewServer(store, serverOpts...)

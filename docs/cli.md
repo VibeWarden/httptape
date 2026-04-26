@@ -30,9 +30,10 @@ httptape serve --fixtures ./fixtures [flags]
 | `--error-rate` | `0` | Fraction of requests that return 500 (0.0-1.0) |
 | `--replay-header` | (none) | Header to inject into responses (`Key=Value`, repeatable) |
 | `--sse-timing` | (none) | SSE replay timing mode: `realtime`, `instant`, `accelerated=<factor>`. When unset, the library default (`realtime`) is used. |
+| `--synthesize` | `false` | Enable synthesis mode. When enabled, exemplar tapes (with `"exemplar": true` and a `url_pattern`) generate responses for unmatched URLs. See [Synthesis](synthesis.md). |
 | `--config` | (none) | Path to httptape config JSON. When the config includes a `matcher` section, the server uses it to build a `CompositeMatcher` instead of the default method + path matcher. Sanitization rules in the config are ignored by `serve`. See [Config](config.md). |
 
-The server uses `DefaultMatcher` (method + path matching) unless a `--config` with a `matcher` section is provided. Fixtures are loaded from the specified directory. The server shuts down gracefully on SIGINT/SIGTERM.
+The server uses `DefaultMatcher` (method + path matching) unless a `--config` with a `matcher` section is provided. Fixtures are loaded from the specified directory. The server shuts down gracefully on SIGINT/SIGTERM. At startup, all loaded tapes are validated; invalid exemplar tapes cause a startup error.
 
 **Example:**
 

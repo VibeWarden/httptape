@@ -840,3 +840,214 @@ func readRequestBody(r *http.Request) []byte {
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	return body
 }
+
+// parseCoercion splits a template expression into the expression body and
+// an optional type coercion. Returns the expression without the coercion
+// pipe, the coercion type (or ""), and whether a coercion was found.
+//
+// Examples:
+//
+//	"pathParam.id | int"          -> ("pathParam.id", "int", true)
+//	"pathParam.id"                -> ("pathParam.id", "", false)
+//	"faker.name seed=foo"         -> ("faker.name seed=foo", "", false)
+//	"request.query.page | float"  -> ("request.query.page", "float", true)
+func parseCoercion(raw string) (expr string, coercion string, ok bool) {
+	// Look for " | type" at the end. Coercion pipes are always preceded and
+	// followed by whitespace.
+	idx := strings.LastIndex(raw, " | ")
+	if idx < 0 {
+		return raw, "", false
+	}
+
+	// The coercion type is the token after the last " | ".
+	candidate := strings.TrimSpace(raw[idx+3:])
+	switch candidate {
+	case "int", "float", "bool":
+		return strings.TrimSpace(raw[:idx]), candidate, true
+	default:
+		// Not a recognized coercion -- treat the entire string as the expression.
+		return raw, "", false
+	}
+}
+
+// coerceValue converts a string value to the specified type. Supported
+// coercions: "int" (float64 with integer value), "float" (float64),
+// "bool" (bool). Returns the typed value or an error if conversion fails.
+func coerceValue(s string, coercion string) (any, error) {
+	switch coercion {
+	case "int":
+		f, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+		if err != nil {
+			return nil, fmt.Errorf("httptape: coercion | int: cannot parse %q as number: %w", s, err)
+		}
+		// Truncate to integer, emit as float64 (JSON number).
+		return math.Trunc(f), nil
+	case "float":
+		f, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+		if err != nil {
+			return nil, fmt.Errorf("httptape: coercion | float: cannot parse %q as number: %w", s, err)
+		}
+		return f, nil
+	case "bool":
+		b, err := strconv.ParseBool(strings.TrimSpace(s))
+		if err != nil {
+			return nil, fmt.Errorf("httptape: coercion | bool: cannot parse %q as boolean: %w", s, err)
+		}
+		return b, nil
+	default:
+		return s, nil
+	}
+}
+
+// resolveExemplarBody resolves template expressions in an exemplar tape's
+// response body. The dispatch is based on the response Content-Type:
+//   - JSON: unmarshal, walk with coercion-aware resolution, re-marshal.
+//   - Text: byte-level template substitution (existing ResolveTemplateBody).
+//   - Binary: no resolution.
+func resolveExemplarBody(body []byte, headers http.Header, ctx *templateCtx, strict bool) ([]byte, error) {
+	if len(body) == 0 || !bytes.Contains(body, []byte("{{")) {
+		return body, nil
+	}
+
+	ct := ""
+	if headers != nil {
+		ct = headers.Get("Content-Type")
+	}
+
+	mt, parseErr := ParseMediaType(ct)
+	if parseErr == nil && IsJSON(mt) {
+		return resolveTemplateJSONWithCoercion(body, ctx, strict)
+	}
+	if parseErr == nil && IsBinary(mt) {
+		// Binary: no template resolution.
+		return body, nil
+	}
+	// Text or unknown: use standard byte-level resolution.
+	return resolveTemplateBytes(body, ctx, strict)
+}
+
+// resolveTemplateJSONWithCoercion resolves template expressions in a JSON
+// body, supporting type coercion via the | int, | float, | bool pipe syntax.
+// When a string value is a single template expression with a coercion suffix,
+// the resolved string value is converted to the specified type (producing a
+// JSON number or boolean instead of a string).
+func resolveTemplateJSONWithCoercion(body []byte, ctx *templateCtx, strict bool) ([]byte, error) {
+	var data any
+	if err := json.Unmarshal(body, &data); err != nil {
+		// Not valid JSON -- fall back to byte-level substitution.
+		return resolveTemplateBytes(body, ctx, strict)
+	}
+
+	var walkErr error
+	data = walkJSONWithCoercion(data, ctx, strict, &walkErr)
+	if walkErr != nil {
+		return nil, walkErr
+	}
+
+	result, err := json.Marshal(data)
+	if err != nil {
+		return body, nil
+	}
+	return result, nil
+}
+
+// walkJSONWithCoercion recursively walks a JSON tree and resolves template
+// expressions in string values, with support for type coercion. When a string
+// value is entirely a single {{...}} expression with a | int/float/bool pipe,
+// the resolved value's type is changed from string to the target type.
+func walkJSONWithCoercion(data any, ctx *templateCtx, strict bool, errOut *error) any {
+	if *errOut != nil {
+		return data
+	}
+
+	switch v := data.(type) {
+	case map[string]any:
+		result := make(map[string]any, len(v))
+		for key, val := range v {
+			result[key] = walkJSONWithCoercion(val, ctx, strict, errOut)
+		}
+		return result
+	case []any:
+		result := make([]any, len(v))
+		for i, val := range v {
+			result[i] = walkJSONWithCoercion(val, ctx, strict, errOut)
+		}
+		return result
+	case string:
+		if !strings.Contains(v, "{{") {
+			return v
+		}
+		return resolveStringWithCoercion(v, ctx, strict, errOut)
+	default:
+		return data
+	}
+}
+
+// resolveStringWithCoercion resolves template expressions in a string value
+// within a JSON context. If the entire string is a single template expression
+// with a type coercion pipe (e.g., "{{pathParam.id | int}}"), the result is
+// a typed value (float64 or bool). Otherwise, the result is a string.
+func resolveStringWithCoercion(s string, ctx *templateCtx, strict bool, errOut *error) any {
+	src := []byte(s)
+	exprs := scanTemplateExprs(src)
+	if len(exprs) == 0 {
+		return s
+	}
+
+	// Check if the entire string is a single template expression (possibly with coercion).
+	if len(exprs) == 1 && exprs[0].start == 0 && exprs[0].end == len(src) {
+		rawExpr := exprs[0].raw
+		exprBody, coercion, hasCoercion := parseCoercion(rawExpr)
+
+		resolved, ok := resolveExpr(exprBody, ctx)
+		if !ok {
+			if strict {
+				*errOut = fmt.Errorf("httptape: unresolvable template expression: {{%s}}", rawExpr)
+				return s
+			}
+			return ""
+		}
+
+		if hasCoercion {
+			typed, err := coerceValue(resolved, coercion)
+			if err != nil {
+				if strict {
+					*errOut = err
+					return s
+				}
+				// Lenient: return the uncoerced string value.
+				return resolved
+			}
+			return typed
+		}
+		return resolved
+	}
+
+	// Mixed content: multiple expressions or expressions with surrounding text.
+	// Resolve all expressions and concatenate as a string.
+	// Coercion in mixed content is not supported.
+	var buf bytes.Buffer
+	buf.Grow(len(s))
+	prev := 0
+
+	for _, expr := range exprs {
+		buf.Write(src[prev:expr.start])
+		rawExpr := expr.raw
+
+		// Strip coercion if present (mixed content ignores it).
+		exprBody, _, _ := parseCoercion(rawExpr)
+		resolved, ok := resolveExpr(exprBody, ctx)
+		if !ok {
+			if strict {
+				*errOut = fmt.Errorf("httptape: unresolvable template expression: {{%s}}", rawExpr)
+				return s
+			}
+			// Lenient: empty string.
+		} else {
+			buf.WriteString(resolved)
+		}
+		prev = expr.end
+	}
+	buf.Write(src[prev:])
+	return buf.String()
+}

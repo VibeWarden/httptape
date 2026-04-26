@@ -612,3 +612,282 @@ func TestRecordedReq_MarshalJSON_FormUrlencoded(t *testing.T) {
 		t.Errorf("expected text string body for form data, got: %s", data)
 	}
 }
+
+// --- Exemplar validation tests (ADR-43) ---
+
+func TestValidateExemplar(t *testing.T) {
+	tests := []struct {
+		name    string
+		tape    Tape
+		wantErr string // empty means no error expected
+	}{
+		{
+			name: "valid exemplar with url_pattern",
+			tape: Tape{
+				ID:       "t-1",
+				Exemplar: true,
+				Request: RecordedReq{
+					Method:     "GET",
+					URLPattern: "/users/:id",
+				},
+				Response: RecordedResp{StatusCode: 200},
+			},
+		},
+		{
+			name: "valid non-exemplar tape",
+			tape: Tape{
+				ID: "t-2",
+				Request: RecordedReq{
+					Method: "GET",
+					URL:    "/users/1",
+				},
+				Response: RecordedResp{StatusCode: 200},
+			},
+		},
+		{
+			name: "exemplar missing url_pattern",
+			tape: Tape{
+				ID:       "t-3",
+				Exemplar: true,
+				Request: RecordedReq{
+					Method: "GET",
+				},
+				Response: RecordedResp{StatusCode: 200},
+			},
+			wantErr: "url_pattern is required",
+		},
+		{
+			name: "exemplar with both url and url_pattern",
+			tape: Tape{
+				ID:       "t-4",
+				Exemplar: true,
+				Request: RecordedReq{
+					Method:     "GET",
+					URL:        "/users/1",
+					URLPattern: "/users/:id",
+				},
+				Response: RecordedResp{StatusCode: 200},
+			},
+			wantErr: "url and url_pattern are mutually exclusive",
+		},
+		{
+			name: "url_pattern without exemplar flag",
+			tape: Tape{
+				ID: "t-5",
+				Request: RecordedReq{
+					Method:     "GET",
+					URLPattern: "/users/:id",
+				},
+				Response: RecordedResp{StatusCode: 200},
+			},
+			wantErr: "url_pattern requires exemplar to be true",
+		},
+		{
+			name: "SSE exemplar rejected",
+			tape: Tape{
+				ID:       "t-6",
+				Exemplar: true,
+				Request: RecordedReq{
+					Method:     "GET",
+					URLPattern: "/events/:id",
+				},
+				Response: RecordedResp{
+					StatusCode: 200,
+					SSEEvents:  []SSEEvent{{Data: "hello"}},
+				},
+			},
+			wantErr: "SSE exemplars are not supported",
+		},
+		{
+			name: "non-exemplar url and url_pattern both set",
+			tape: Tape{
+				ID: "t-7",
+				Request: RecordedReq{
+					Method:     "GET",
+					URL:        "/users/1",
+					URLPattern: "/users/:id",
+				},
+				Response: RecordedResp{StatusCode: 200},
+			},
+			wantErr: "url and url_pattern are mutually exclusive",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateExemplar(tt.tape)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Errorf("ValidateExemplar() unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Errorf("ValidateExemplar() = nil, want error containing %q", tt.wantErr)
+				return
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("ValidateExemplar() error = %q, want substring %q", err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateTape_DelegatesToValidateExemplar(t *testing.T) {
+	invalid := Tape{
+		ID:       "t-bad",
+		Exemplar: true,
+		Request:  RecordedReq{Method: "GET"},
+		Response: RecordedResp{StatusCode: 200},
+	}
+	err := ValidateTape(invalid)
+	if err == nil {
+		t.Error("ValidateTape() = nil, want error for exemplar missing url_pattern")
+	}
+}
+
+func TestTape_MarshalJSON_Exemplar(t *testing.T) {
+	tape := Tape{
+		ID:       "exemplar-1",
+		Route:    "api",
+		Exemplar: true,
+		Request: RecordedReq{
+			Method:     "GET",
+			URLPattern: "/users/:id",
+			Headers:    http.Header{"Accept": {"application/json"}},
+		},
+		Response: RecordedResp{
+			StatusCode: 200,
+			Headers:    http.Header{"Content-Type": {"application/json"}},
+			Body:       []byte(`{"id":"{{pathParam.id | int}}"}`),
+		},
+	}
+
+	data, err := json.MarshalIndent(tape, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal error: %v", err)
+	}
+
+	s := string(data)
+	if !strings.Contains(s, `"exemplar": true`) {
+		t.Errorf("marshal should contain exemplar: true, got:\n%s", s)
+	}
+	if !strings.Contains(s, `"url_pattern": "/users/:id"`) {
+		t.Errorf("marshal should contain url_pattern, got:\n%s", s)
+	}
+}
+
+func TestTape_UnmarshalJSON_Exemplar(t *testing.T) {
+	input := `{
+		"id": "exemplar-1",
+		"route": "api",
+		"recorded_at": "2026-01-01T00:00:00Z",
+		"exemplar": true,
+		"request": {
+			"method": "GET",
+			"url_pattern": "/users/:id",
+			"headers": {},
+			"body": null,
+			"body_hash": ""
+		},
+		"response": {
+			"status_code": 200,
+			"headers": {"Content-Type": ["application/json"]},
+			"body": {"id": "{{pathParam.id | int}}"}
+		}
+	}`
+
+	var tape Tape
+	if err := json.Unmarshal([]byte(input), &tape); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+
+	if !tape.Exemplar {
+		t.Error("Exemplar should be true after unmarshal")
+	}
+	if tape.Request.URLPattern != "/users/:id" {
+		t.Errorf("URLPattern = %q, want %q", tape.Request.URLPattern, "/users/:id")
+	}
+	if tape.Request.URL != "" {
+		t.Errorf("URL = %q, want empty for exemplar tape", tape.Request.URL)
+	}
+}
+
+func TestTape_UnmarshalJSON_NoExemplar(t *testing.T) {
+	input := `{
+		"id": "normal-1",
+		"route": "api",
+		"recorded_at": "2026-01-01T00:00:00Z",
+		"request": {
+			"method": "GET",
+			"url": "http://example.com/users/1",
+			"headers": {},
+			"body": null,
+			"body_hash": ""
+		},
+		"response": {
+			"status_code": 200,
+			"headers": {"Content-Type": ["application/json"]},
+			"body": {"id": 1}
+		}
+	}`
+
+	var tape Tape
+	if err := json.Unmarshal([]byte(input), &tape); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+
+	if tape.Exemplar {
+		t.Error("Exemplar should be false when field is absent")
+	}
+	if tape.Request.URLPattern != "" {
+		t.Errorf("URLPattern = %q, want empty for normal tape", tape.Request.URLPattern)
+	}
+}
+
+func TestTape_MarshalJSON_RoundTrip_Exemplar(t *testing.T) {
+	original := Tape{
+		ID:       "rt-1",
+		Route:    "api",
+		Exemplar: true,
+		Request: RecordedReq{
+			Method:     "GET",
+			URLPattern: "/items/:category/:id",
+			Headers:    http.Header{},
+		},
+		Response: RecordedResp{
+			StatusCode: 200,
+			Headers:    http.Header{"Content-Type": {"application/json"}},
+			Body:       []byte(`{"category":"{{pathParam.category}}"}`),
+		},
+	}
+
+	data, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("marshal error: %v", err)
+	}
+
+	var roundTripped Tape
+	if err := json.Unmarshal(data, &roundTripped); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+
+	if roundTripped.Exemplar != original.Exemplar {
+		t.Errorf("Exemplar = %v, want %v", roundTripped.Exemplar, original.Exemplar)
+	}
+	if roundTripped.Request.URLPattern != original.Request.URLPattern {
+		t.Errorf("URLPattern = %q, want %q", roundTripped.Request.URLPattern, original.Request.URLPattern)
+	}
+	if roundTripped.Request.URL != "" {
+		t.Errorf("URL = %q, want empty after round-trip", roundTripped.Request.URL)
+	}
+
+	// Re-marshal and compare.
+	data2, err := json.Marshal(roundTripped)
+	if err != nil {
+		t.Fatalf("re-marshal error: %v", err)
+	}
+	if string(data) != string(data2) {
+		t.Errorf("round-trip mismatch:\n  first:  %s\n  second: %s", data, data2)
+	}
+}
