@@ -3,8 +3,13 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/ecdsa"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -978,4 +983,339 @@ func itoa(i int) string {
 		buf[pos] = '-'
 	}
 	return string(buf[pos:])
+}
+
+// --- TLS listener flag tests ---
+
+func TestTLSListenerFlags_MutualExclusion(t *testing.T) {
+	tests := []struct {
+		name   string
+		args   []string
+		want   int
+		errMsg string
+	}{
+		{
+			name:   "auto with cert is rejected",
+			args:   []string{"serve", "--fixtures", t.TempDir(), "--tls-listener-auto", "--tls-listener-cert", "c.pem"},
+			want:   exitUsage,
+			errMsg: "mutually exclusive",
+		},
+		{
+			name:   "auto with key is rejected",
+			args:   []string{"serve", "--fixtures", t.TempDir(), "--tls-listener-auto", "--tls-listener-key", "k.pem"},
+			want:   exitUsage,
+			errMsg: "mutually exclusive",
+		},
+		{
+			name:   "cert without key is rejected",
+			args:   []string{"serve", "--fixtures", t.TempDir(), "--tls-listener-cert", "c.pem"},
+			want:   exitUsage,
+			errMsg: "requires --tls-listener-key",
+		},
+		{
+			name:   "key without cert is rejected",
+			args:   []string{"serve", "--fixtures", t.TempDir(), "--tls-listener-key", "k.pem"},
+			want:   exitUsage,
+			errMsg: "requires --tls-listener-cert",
+		},
+		{
+			name:   "san without auto is rejected",
+			args:   []string{"serve", "--fixtures", t.TempDir(), "--tls-listener-san", "custom.local"},
+			want:   exitUsage,
+			errMsg: "requires --tls-listener-auto",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := run(tt.args)
+			if got != tt.want {
+				t.Errorf("run(%v) = %d, want %d", tt.args, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTLSListenerFlags_MutualExclusionOnRecord(t *testing.T) {
+	tmpDir := t.TempDir()
+	got := run([]string{
+		"record",
+		"--upstream", "http://example.com",
+		"--fixtures", tmpDir,
+		"--tls-listener-auto",
+		"--tls-listener-cert", "c.pem",
+	})
+	if got != exitUsage {
+		t.Errorf("got exit %d, want %d (mutual exclusion on record)", got, exitUsage)
+	}
+}
+
+func TestTLSListenerFlags_MutualExclusionOnProxy(t *testing.T) {
+	tmpDir := t.TempDir()
+	got := run([]string{
+		"proxy",
+		"--upstream", "http://example.com",
+		"--fixtures", tmpDir,
+		"--tls-listener-auto",
+		"--tls-listener-key", "k.pem",
+	})
+	if got != exitUsage {
+		t.Errorf("got exit %d, want %d (mutual exclusion on proxy)", got, exitUsage)
+	}
+}
+
+func TestTLSListenerFlags_ExplicitCertMissingFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	got := run([]string{
+		"serve",
+		"--fixtures", tmpDir,
+		"--tls-listener-cert", "/nonexistent/cert.pem",
+		"--tls-listener-key", "/nonexistent/key.pem",
+	})
+	if got != exitUsage {
+		t.Errorf("got exit %d, want %d (missing cert file)", got, exitUsage)
+	}
+}
+
+func TestTLSListenerFlags_HelpShowsNewFlags(t *testing.T) {
+	// Capture stderr where flag.Usage writes.
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	origStderr := os.Stderr
+	os.Stderr = w
+
+	go func() {
+		_ = run([]string{"serve", "-h"})
+		w.Close()
+	}()
+
+	br := bufio.NewReader(r)
+	var sb strings.Builder
+	for {
+		line, err := br.ReadString('\n')
+		sb.WriteString(line)
+		if err != nil {
+			break
+		}
+	}
+	os.Stderr = origStderr
+
+	got := sb.String()
+	for _, flag := range []string{"-tls-listener-cert", "-tls-listener-key", "-tls-listener-auto", "-tls-listener-san"} {
+		if !strings.Contains(got, flag) {
+			t.Errorf("%s missing from serve help output", flag)
+		}
+	}
+}
+
+func TestTLSListenerAutoServe(t *testing.T) {
+	// Create a fixture directory with a tape so the serve endpoint returns something.
+	fixturesDir := t.TempDir()
+	store, err := httptape.NewFileStore(httptape.WithDirectory(fixturesDir))
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	tape := httptape.NewTape("test", httptape.RecordedReq{
+		Method:  "GET",
+		URL:     "http://localhost/ping",
+		Headers: http.Header{},
+	}, httptape.RecordedResp{
+		StatusCode: 200,
+		Headers:    http.Header{"Content-Type": {"text/plain"}},
+		Body:       []byte("pong"),
+	})
+	if err := store.Save(context.Background(), tape); err != nil {
+		t.Fatalf("save tape: %v", err)
+	}
+
+	// Find a free port.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	ln.Close()
+
+	done := make(chan int, 1)
+	go func() {
+		done <- run([]string{
+			"serve",
+			"--fixtures", fixturesDir,
+			"--port", itoa(port),
+			"--tls-listener-auto",
+			"--tls-listener-san", "localhost,127.0.0.1",
+		})
+	}()
+
+	base := fmt.Sprintf("https://127.0.0.1:%d", port)
+
+	// Wait for the HTTPS listener to come up. Use InsecureSkipVerify
+	// because we don't have the auto-generated cert's CertPEM.
+	client := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	var lastErr error
+	for {
+		resp, err := client.Get(base + "/ping")
+		if err == nil {
+			resp.Body.Close()
+			break
+		}
+		lastErr = err
+		if time.Now().After(deadline) {
+			t.Fatalf("HTTPS listener never came up: %v", lastErr)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	resp, err := client.Get(base + "/ping")
+	if err != nil {
+		t.Fatalf("GET /ping: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+	if string(body) != "pong" {
+		t.Errorf("body = %q, want %q", string(body), "pong")
+	}
+
+	// Verify TLS is actually used.
+	if resp.TLS == nil {
+		t.Error("expected TLS connection but resp.TLS is nil")
+	}
+
+	// Shutdown.
+	p, _ := os.FindProcess(os.Getpid())
+	_ = p.Signal(os.Interrupt)
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("CLI did not exit after SIGINT")
+	}
+}
+
+func TestTLSListenerExplicitCertServe(t *testing.T) {
+	// Generate a cert+key pair using the helper (which extracts the private key
+	// from the library's SelfSignedCert to produce PEM files for --tls-listener-cert/key).
+	dir := t.TempDir()
+	certPEM, keyPEM := generateTestCertAndKey(t, "localhost", "127.0.0.1")
+	certPath := filepath.Join(dir, "cert.pem")
+	keyPath := filepath.Join(dir, "key.pem")
+	if err := os.WriteFile(certPath, certPEM, 0o600); err != nil {
+		t.Fatalf("write cert: %v", err)
+	}
+	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+
+	fixturesDir := t.TempDir()
+	store, err := httptape.NewFileStore(httptape.WithDirectory(fixturesDir))
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	tape := httptape.NewTape("test", httptape.RecordedReq{
+		Method:  "GET",
+		URL:     "http://localhost/hello",
+		Headers: http.Header{},
+	}, httptape.RecordedResp{
+		StatusCode: 200,
+		Headers:    http.Header{"Content-Type": {"text/plain"}},
+		Body:       []byte("world"),
+	})
+	if err := store.Save(context.Background(), tape); err != nil {
+		t.Fatalf("save tape: %v", err)
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	ln.Close()
+
+	done := make(chan int, 1)
+	go func() {
+		done <- run([]string{
+			"serve",
+			"--fixtures", fixturesDir,
+			"--port", itoa(port),
+			"--tls-listener-cert", certPath,
+			"--tls-listener-key", keyPath,
+		})
+	}()
+
+	// Trust the cert we generated.
+	pool := x509.NewCertPool()
+	pool.AppendCertsFromPEM(certPEM)
+	client := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{RootCAs: pool},
+		},
+	}
+
+	base := fmt.Sprintf("https://127.0.0.1:%d", port)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		resp, err := client.Get(base + "/hello")
+		if err == nil {
+			resp.Body.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("HTTPS listener never came up: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	resp, err := client.Get(base + "/hello")
+	if err != nil {
+		t.Fatalf("GET /hello: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "world" {
+		t.Errorf("body = %q, want %q", string(body), "world")
+	}
+
+	p, _ := os.FindProcess(os.Getpid())
+	_ = p.Signal(os.Interrupt)
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("CLI did not exit after SIGINT")
+	}
+}
+
+// generateTestCertAndKey creates a self-signed PEM cert and key for testing.
+// It extracts the private key from the library's SelfSignedCert type to produce
+// both PEM-encoded cert and key suitable for --tls-listener-cert/--tls-listener-key.
+func generateTestCertAndKey(t *testing.T, hosts ...string) (certPEM, keyPEM []byte) {
+	t.Helper()
+	sc, err := httptape.GenerateSelfSignedCert(hosts...)
+	if err != nil {
+		t.Fatalf("GenerateSelfSignedCert: %v", err)
+	}
+
+	ecKey, ok := sc.TLSCertificate.PrivateKey.(*ecdsa.PrivateKey)
+	if !ok {
+		t.Fatal("expected ECDSA private key")
+	}
+	keyDER, err := x509.MarshalECPrivateKey(ecKey)
+	if err != nil {
+		t.Fatalf("marshal key: %v", err)
+	}
+
+	return sc.CertPEM, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
 }

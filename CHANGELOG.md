@@ -8,6 +8,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Inbound TLS listener**: CLI commands `serve`, `record`, and `proxy`
+  accept `--tls-listener-cert`/`--tls-listener-key` (explicit PEM cert)
+  or `--tls-listener-auto` (self-signed cert at startup). The
+  `--tls-listener-san` flag customizes SANs for auto-generated certs.
+  `Server` remains a pure `http.Handler`; TLS is a listener concern. (#197)
+
+- **`GenerateSelfSignedCert`**: Library function that produces an ECDSA
+  P-256 self-signed certificate (24h validity, 1h NotBefore skew) for
+  programmatic use in tests. Returns `*SelfSignedCert` with
+  `TLSCertificate`, `CertPEM`, and SHA-256 `Fingerprint`. (#197)
+
 - **`WithCacheLookupDisabled()`**: CachingOption that disables the cache
   hit path entirely. Every request is forwarded to upstream and recorded.
   Single-flight dedup, SSE tee, sanitization, and stale fallback remain
