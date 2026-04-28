@@ -67,7 +67,7 @@ The `GenerateSelfSignedCert` function generates a self-signed certificate
 for programmatic use in tests:
 
 ```go
-import "github.com/VibeWarden/httptape"
+import "github.com/httptape/httptape"
 
 sc, err := httptape.GenerateSelfSignedCert("localhost", "127.0.0.1")
 if err != nil {

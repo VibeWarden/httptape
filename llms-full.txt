@@ -251,7 +251,7 @@ func FakeSSEEventData(seed string, paths ...string) SanitizeFunc
 ## Links
 
 - Repo: https://github.com/httptape/httptape
-- Docs: https://vibewarden.dev/docs/httptape
+- Docs: https://httptape.dev/docs
 - Go pkg: https://pkg.go.dev/github.com/httptape/httptape
 - Docker: ghcr.io/httptape/httptape
 # httptape

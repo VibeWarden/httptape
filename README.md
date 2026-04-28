@@ -24,7 +24,7 @@ sensitive data on write, and replays them as a mock server. Think WireMock, but
 with a 3 MB Docker image, an embeddable Go library, SSE record/replay with
 per-event timing, and a redaction pipeline built into the core.
 
-**Docs**: [vibewarden.dev/docs/httptape](https://vibewarden.dev/docs/httptape/) · **From**: [VibeWarden](https://vibewarden.dev)
+**Docs**: [httptape.dev/docs](https://httptape.dev/docs/) · **From**: [VibeWarden](https://vibewarden.dev)
 
 **The 3 Rs:**
 
@@ -92,7 +92,7 @@ httptape proxy --upstream https://api.example.com \
     --fixtures ./cache --config redact.json
 ```
 
-When the upstream is reachable, requests are forwarded and responses are cached in two tiers (L1 in-memory, L2 on disk). When the upstream is down, httptape transparently serves cached responses. See [Proxy Mode](https://vibewarden.dev/docs/httptape/proxy/) for details.
+When the upstream is reachable, requests are forwarded and responses are cached in two tiers (L1 in-memory, L2 on disk). When the upstream is down, httptape transparently serves cached responses. See [Proxy Mode](https://httptape.dev/docs/proxy/) for details.
 
 ### Recording LLM streaming responses
 Record SSE streams from OpenAI, Anthropic, or any SSE-based API. Each event is stored individually with timing metadata, so replay can simulate the original streaming behavior.
@@ -128,7 +128,7 @@ defer ts.Close()
 // Point your code at ts.URL -- streaming responses replay instantly.
 ```
 
-See [Recording](https://vibewarden.dev/docs/httptape/recording/) and [Replay](https://vibewarden.dev/docs/httptape/replay/) for details on SSE support.
+See [Recording](https://httptape.dev/docs/recording/) and [Replay](https://httptape.dev/docs/replay/) for details on SSE support.
 
 ## Install
 
@@ -383,14 +383,14 @@ More examples coming. See [`examples/README.md`](examples/README.md) for the ind
 
 ## Documentation
 
-Full docs at **[vibewarden.dev/docs/httptape](https://vibewarden.dev/docs/httptape/)**.
+Full docs at **[httptape.dev/docs](https://httptape.dev/docs/)**.
 
-- [Getting Started](https://vibewarden.dev/docs/httptape/getting-started/)
-- [Recording](https://vibewarden.dev/docs/httptape/recording/) · [Replay](https://vibewarden.dev/docs/httptape/replay/) · [Redaction](https://vibewarden.dev/docs/httptape/sanitization/)
-- [Proxy Mode](https://vibewarden.dev/docs/httptape/proxy/) · [Matching](https://vibewarden.dev/docs/httptape/matching/) · [Storage](https://vibewarden.dev/docs/httptape/storage/)
-- [Import/Export](https://vibewarden.dev/docs/httptape/import-export/) · [JSON Config](https://vibewarden.dev/docs/httptape/config/)
-- [CLI Reference](https://vibewarden.dev/docs/httptape/cli/) · [Docker](https://vibewarden.dev/docs/httptape/docker/) · [Testcontainers](https://vibewarden.dev/docs/httptape/testcontainers/)
-- [API Reference](https://vibewarden.dev/docs/httptape/api-reference/)
+- [Getting Started](https://httptape.dev/docs/getting-started/)
+- [Recording](https://httptape.dev/docs/recording/) · [Replay](https://httptape.dev/docs/replay/) · [Redaction](https://httptape.dev/docs/sanitization/)
+- [Proxy Mode](https://httptape.dev/docs/proxy/) · [Matching](https://httptape.dev/docs/matching/) · [Storage](https://httptape.dev/docs/storage/)
+- [Import/Export](https://httptape.dev/docs/import-export/) · [JSON Config](https://httptape.dev/docs/config/)
+- [CLI Reference](https://httptape.dev/docs/cli/) · [Docker](https://httptape.dev/docs/docker/) · [Testcontainers](https://httptape.dev/docs/testcontainers/)
+- [API Reference](https://httptape.dev/docs/api-reference/)
 
 ## About
 
