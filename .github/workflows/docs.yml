@@ -1,4 +1,4 @@
-name: Deploy docs to vibewarden.dev
+name: Deploy docs to httptape.dev
 
 on:
   push:
@@ -24,9 +24,9 @@ jobs:
       - uses: peaceiris/actions-gh-pages@v4
         with:
           deploy_key: ${{ secrets.DOCS_DEPLOY_KEY }}
-          external_repository: vibewarden/vibewarden.dev
+          external_repository: httptape/httptape.dev
           publish_branch: main
           publish_dir: ./_site/docs
-          destination_dir: docs/httptape
+          destination_dir: docs
           keep_files: true
-          commit_message: "docs: sync from vibewarden/httptape@${{ github.sha }}"
+          commit_message: "docs: sync from httptape/httptape@${{ github.sha }}"

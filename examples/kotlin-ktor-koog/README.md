@@ -76,7 +76,7 @@ Tests spin up an httptape container via Testcontainers, run the Koog agent again
 
 Drop a JSON file anywhere under `src/test/resources/fixtures/` -- the SDK's classpath scanner auto-discovers it. No code changes needed.
 
-The httptape Tape JSON schema (and how to record real upstream traffic into one) is documented at [vibewarden.dev/docs/httptape](https://vibewarden.dev/docs/httptape/).
+The httptape Tape JSON schema (and how to record real upstream traffic into one) is documented at [httptape.dev/docs](https://httptape.dev/docs/).
 
 ## Development workflow -- run with the same Testcontainers setup
 

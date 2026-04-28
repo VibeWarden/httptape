@@ -1,6 +1,6 @@
 site_name: httptape
 site_description: "Record, Redact, Replay -- HTTP traffic recording, redaction, and replay."
-site_url: https://vibewarden.dev/docs/httptape
+site_url: https://httptape.dev/docs
 repo_url: https://github.com/httptape/httptape
 repo_name: httptape/httptape
 edit_uri: edit/main/docs/
