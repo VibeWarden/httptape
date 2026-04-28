@@ -34,7 +34,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/VibeWarden/httptape"
+	"github.com/httptape/httptape"
 )
 
 // usageError wraps an error to indicate a usage/flag-parsing problem (exit code 1)
