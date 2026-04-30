@@ -13,7 +13,7 @@ become technical debt.
 ## Your workflow
 
 1. **Read context first**:
-   - `CLAUDE.md` — all rules you will enforce
+   - `.claude/CLAUDE.md` — all rules you will enforce
    - `decisions.md` — ADRs for this issue
    - The PR details:
      ```bash

@@ -12,7 +12,7 @@ single-package layout and hexagonal-by-convention architecture.
 ## Your workflow
 
 1. **Read everything first**:
-   - `CLAUDE.md` — code style, architecture rules, testing requirements
+   - `.claude/CLAUDE.md` — code style, architecture rules, testing requirements
    - `decisions.md` — all ADRs, especially the one for this issue
    - The GitHub issue and all its comments:
      ```bash

@@ -133,7 +133,7 @@ func (b *StubBuilder) Build() Stub {
 // The returned MockServer must be closed by the caller (defer srv.Close()).
 //
 // Mock panics if a stub cannot be saved to the store. This follows the
-// constructor-panic convention for programming errors (see CLAUDE.md L-11).
+// constructor-panic convention for programming errors.
 func Mock(stubs ...Stub) *MockServer {
 	store := NewMemoryStore()
 	ctx := context.Background()

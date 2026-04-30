@@ -2,12 +2,7 @@
   <img src="https://raw.githubusercontent.com/httptape/httptape/main/assets/logo.png" alt="httptape logo" width="300">
 </p>
 
-<h3 align="center">Record, Redact, Replay</h3>
-
-<p align="center">
-  HTTP traffic recording, redaction, and replay.<br>
-  <strong>Embeddable Go library · CLI · Docker · Testcontainers</strong>
-</p>
+<h3 align="center">Like WireMock, but a 3 MB embeddable Go library — with redaction, SSE, and recording built in.</h3>
 
 <p align="center">
   <a href="https://pkg.go.dev/github.com/httptape/httptape"><img src="https://pkg.go.dev/badge/github.com/httptape/httptape.svg" alt="Go Reference"></a>
@@ -17,14 +12,18 @@
   <a href="https://hub.docker.com/r/tibtof/httptape"><img src="https://img.shields.io/docker/image-size/tibtof/httptape/latest?label=docker" alt="Docker Image Size"></a>
 </p>
 
----
+```go
+rec := httptape.NewRecorder(store, httptape.WithSanitizer(sanitizer))
+client := &http.Client{Transport: rec}            // record real traffic; secrets redacted on write
+srv := httptape.NewServer(store)                  // replay deterministically — no live API needed
+```
 
 httptape captures HTTP request/response pairs (including SSE streams), redacts
-sensitive data on write, and replays them as a mock server. Think WireMock, but
-with a 3 MB Docker image, an embeddable Go library, SSE record/replay with
-per-event timing, and a redaction pipeline built into the core.
+sensitive data on write, and replays them as a mock server. Embeddable Go
+library, CLI, 3 MB Docker image, and Testcontainers support. Stdlib-only, zero
+transitive dependencies.
 
-**Docs**: [httptape.dev/docs](https://httptape.dev/docs/) · **From**: [VibeWarden](https://vibewarden.dev)
+**Docs**: [httptape.dev/docs](https://httptape.dev/docs/)
 
 **The 3 Rs:**
 
@@ -354,19 +353,21 @@ More examples coming. See [`examples/README.md`](examples/README.md) for the ind
 
 ## How it compares
 
-| Feature | httptape | WireMock | json-server | MSW | gock |
-|---|---|---|---|---|---|
-| Embeddable in Go | **yes** | no (Java) | no (Node) | no (browser) | yes |
-| Standalone server | **yes** | yes | yes | no | no |
-| Docker | **3 MB** | 200 MB+ | 50 MB+ | n/a | n/a |
-| Recording | **yes** | yes | no | no | no |
-| Redaction on write | **yes** | no | no | no | no |
-| Deterministic faking | **yes** | no | no | no | no |
-| Proxy with fallback | **yes** | no | no | no | no |
-| SSE record/replay | **yes** | no | no | partial | no |
-| Frontend mock backend | **yes** | yes | yes | yes (browser) | no |
-| Fixture import/export | **yes** | partial | no | no | no |
-| Dependencies | **zero** | JVM | npm | npm | 1 |
+| Feature | httptape | WireMock | go-vcr | json-server | MSW | gock |
+|---|---|---|---|---|---|---|
+| Embeddable in Go | **yes** | no (Java) | yes (test-only) | no (Node) | no (browser) | yes |
+| Standalone server | **yes** | yes | no | yes | no | no |
+| Docker | **3 MB** | 200 MB+ | n/a | 50 MB+ | n/a | n/a |
+| Recording | **yes** | yes | yes | no | no | no |
+| Redaction on write | **yes** | no | manual hooks | no | no | no |
+| Deterministic faking | **yes** | no | no | no | no | no |
+| Proxy with fallback | **yes** | no | no | no | no | no |
+| SSE record/replay | **yes** | no | no | no | partial | no |
+| Frontend mock backend | **yes** | yes | no | yes | yes (browser) | no |
+| Fixture import/export | **yes** | partial | no | no | no | no |
+| Dependencies | **zero** | JVM | yaml.v3 | npm | npm | 1 |
+
+**vs. [go-vcr](https://github.com/dnaeon/go-vcr)** — go-vcr is the de-facto cassette library for Go tests. httptape covers a different surface: it can also run as a standalone mock server (Docker / CLI / Testcontainers), redacts on write through a declarative pipeline (go-vcr exposes `BeforeSaveHook` callbacks but no built-in rules), records SSE streams with per-event timing, and bundles a fallback-to-cache proxy. If your only need is replaying cassettes inside `*_test.go`, go-vcr is smaller and a perfectly good fit.
 
 ## Key design decisions
 
