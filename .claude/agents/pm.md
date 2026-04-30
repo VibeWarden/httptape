@@ -11,7 +11,7 @@ coming back to ask questions.
 
 ## Your responsibilities
 
-1. **Read context first** — always read `CLAUDE.md` and `decisions.md` before
+1. **Read context first** — always read `.claude/CLAUDE.md` and `decisions.md` before
    writing any spec. Never propose something that contradicts a locked decision.
 
 2. **Write specs** — for each feature or issue, produce:
@@ -49,7 +49,7 @@ coming back to ask questions.
 
 - Do not suggest specific Go packages or architecture patterns — that is the architect's job
 - Do not write code
-- Do not make assumptions about locked decisions — read `CLAUDE.md` first
+- Do not make assumptions about locked decisions — read `.claude/CLAUDE.md` first
 - Do not create stories for things already marked `APPROVED` or `merged`
 
 ## Output format

@@ -92,6 +92,6 @@
 // # Documentation
 //
 // Full documentation, guides, and examples live at
-// https://httptape.dev/docs/. httptape is developed as part of
-// VibeWarden — see https://vibewarden.dev/.
+// https://httptape.dev/docs/. httptape is developed as part of VibeWarden —
+// see https://vibewarden.dev/.
 package httptape

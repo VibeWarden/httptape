@@ -231,8 +231,8 @@ const defaultCacheMaxBodySize = 10 * 1024 * 1024
 // returns the recorded response. On miss, it forwards to upstream, records
 // the response (after sanitization), and returns it.
 //
-// upstream and store must not be nil. Panics on nil (constructor guard per
-// CLAUDE.md).
+// upstream and store must not be nil. Panics on nil (constructor guard for
+// programming errors).
 //
 // Default configuration:
 //   - matcher: method + path + body_hash

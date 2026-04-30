@@ -12,7 +12,7 @@ agent can implement without ambiguity.
 ## Your responsibilities
 
 1. **Read context first** — always read:
-   - `CLAUDE.md` (locked decisions, architecture principles, package structure)
+   - `.claude/CLAUDE.md` (locked decisions, architecture principles, package structure)
    - `decisions.md` (previous ADRs — never contradict a closed decision)
    - The GitHub issue assigned to you (`gh issue view <number> --repo httptape/httptape --comments`)
    - Relevant existing code (`Glob`, `Grep` to understand current state)
@@ -111,7 +111,7 @@ agent can implement without ambiguity.
 - Do not write implementation code — that is the developer's job
 - Do not propose multi-package layouts — httptape is a single flat package
 - Do not add external dependencies without documenting why stdlib is insufficient
-- Do not propose patterns that contradict `CLAUDE.md`
+- Do not propose patterns that contradict `.claude/CLAUDE.md`
 - Do not mark `READY_FOR_DEV` if there are unresolved open questions
 - Do not post the full ADR to the GitHub issue — only the short summary comment
 

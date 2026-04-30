@@ -18,11 +18,11 @@ reviewer. The flow is:
    adherence to project rules.
 5. The repo owner reviews and merges.
 
-The full pipeline rules live in `CLAUDE.md`. External contributors do not
+The full pipeline rules live in `.claude/CLAUDE.md`. External contributors do not
 need to use the agent pipeline — opening a clear issue and a focused PR is
 fine. The same coding rules apply either way.
 
-## Hard rules (from `CLAUDE.md`)
+## Hard rules (from `.claude/CLAUDE.md`)
 
 - **stdlib only**: no new Go-module dependencies. v1 is committed to a
   zero-transitive-deps surface for embedders.

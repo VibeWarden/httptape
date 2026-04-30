@@ -453,7 +453,7 @@ func WithProxyUpstreamURL(url string) ProxyOption {
 // unsanitized data. See the Proxy type documentation for details.
 //
 // Both l1 and l2 must be non-nil. Panics on nil stores (constructor guard
-// convention per CLAUDE.md).
+// convention for programming errors).
 //
 // Returns an error if any cross-option constraints are violated (e.g.,
 // WithProxyHealthEndpoint without WithProxyUpstreamURL). All validation
